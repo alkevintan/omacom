@@ -80,6 +80,7 @@ Service {
   }
 
   function startTalking() {
+    if (!root.available) return
     root.talking = true
     root.sendOp("startTalking")
   }
@@ -87,6 +88,12 @@ Service {
   function stopTalking() {
     root.talking = false
     root.sendOp("stopTalking")
+  }
+
+  function toggleTalking() {
+    if (!root.available) return
+    if (root.talking) root.stopTalking()
+    else root.startTalking()
   }
 
   function toggleAvailable() {
@@ -134,6 +141,7 @@ Service {
     function state(): string { return root.state() }
     function startTalking(): void { root.startTalking() }
     function stopTalking(): void { root.stopTalking() }
+    function toggleTalking(): void { root.toggleTalking() }
     function getPeers(): string { root.refreshPeers(); return root.state() }
     function toggleAvailable(): void { root.toggleAvailable() }
     function setAvailable(v: bool): void { root.available = !!v; root.sendOp(v ? "setAvailable:true" : "setAvailable:false") }

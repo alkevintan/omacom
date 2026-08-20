@@ -53,14 +53,39 @@ The bar widget and service load without the daemon — they show "daemon not run
 ## Usage
 
 * **Hold left-click** on the bullhorn icon in the bar, or hold **Space** when the bar has focus, to talk. Release to listen.
-* **Right-click** the icon for the peer panel (stub in 0.1.0 — shows peer count).
+* **Right-click** (or middle-click) the icon to toggle availability — turns the intercom off (dimmed, no broadcast, no audio) and back on.
 * From the shell:
 
 ```sh
 omarchy-shell shell call com.aktivesolutions.omacom state
 omarchy-shell shell call com.aktivesolutions.omacom startTalking
 omarchy-shell shell call com.aktivesolutions.omacom stopTalking
-omarchy-shell shell toggle com.aktivesolutions.omacom # if you add a panel later
+omarchy-shell shell call com.aktivesolutions.omacom toggleTalking      # push-to-talk toggle
+omarchy-shell shell call com.aktivesolutions.omacom toggleAvailable     # intercom on/off
+```
+
+### Keybindings — push-to-talk
+
+Add to `~/.config/hypr/bindings.lua` (Omarchy's Hyprland config):
+
+```lua
+-- Hold SUPER+I to talk (press → start, release → stop) — best for PTT
+ o.bind("SUPER + I", "Omacom PTT", "omarchy-shell shell call com.aktivesolutions.omacom startTalking")
+-- Hyprland release binding (if your Omarchy build exposes bindr, use it; otherwise toggle is more reliable):
+-- o.bindr("SUPER + I", "Omacom PTT release", "omarchy-shell shell call com.aktivesolutions.omacom stopTalking")
+-- Simple toggle if you don't have bindr — press once to talk, again to stop:
+ o.bind("SUPER + SHIFT + I", "Omacom toggle talk", "omarchy-shell shell call com.aktivesolutions.omacom toggleTalking")
+-- Toggle intercom availability (do-not-disturb)
+ o.bind("SUPER + ALT + I", "Omacom availability", "omarchy-shell shell call com.aktivesolutions.omacom toggleAvailable")
+```
+
+If `o.bindr` is not available in your Omarchy build, use the toggle (`SUPER+SHIFT+I`) — it flips talking without needing a release event. Raw Hyprland fallback:
+
+```ini
+# ~/.config/hypr/hyprland.conf
+bind = SUPER, I, exec, omarchy-shell shell call com.aktivesolutions.omacom startTalking
+bindr = SUPER, I, exec, omarchy-shell shell call com.aktivesolutions.omacom stopTalking
+bind = SUPER_SHIFT, I, exec, omarchy-shell shell call com.aktivesolutions.omacom toggleTalking
 ```
 
 ### Discovery
