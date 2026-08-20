@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "id": "com.aktivesolutions.omacom",
+  "name": "Omacom",
+  "version": "0.1.0",
+  "author": "keboy",
+  "license": "MIT",
+  "description": "Push-to-talk intercom over LAN / Tailscale — bar widget + local daemon, hold to talk without leaving your workflow.",
+  "kinds": ["bar-widget", "service"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Omacom",
+    "description": "Intercom status and push-to-talk in the bar",
+    "category": "Communication",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "daemonSocket": "",
+      "pttKey": "Space",
+      "autoStartDaemon": true,
+      "discoveryPort": 53318
+    },
+    "schema": [
+      {
+        "key": "daemonSocket",
+        "type": "string",
+        "label": "Daemon socket path (blank = default)",
+        "defaultValue": ""
+      },
+      {
+        "key": "pttKey",
+        "type": "string",
+        "label": "Push-to-talk key",
+        "defaultValue": "Space"
+      },
+      {
+        "key": "autoStartDaemon",
+        "type": "boolean",
+        "label": "Start daemon automatically",
+        "defaultValue": true
+      },
+      {
+        "key": "discoveryPort",
+        "type": "integer",
+        "label": "Discovery / audio UDP port",
+        "min": 1024,
+        "max": 65535,
+        "step": 1,
+        "defaultValue": 53318
+      }
+    ]
+  }
+}

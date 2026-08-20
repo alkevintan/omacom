@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+# bin/omacom-setup — build omacom-engine from the checkout's source.
+# No download by default so the running binary is auditable from the reviewed commit.
+# Needs Go; without it, explains instead of installing a prebuilt.
+# OMACOM_ALLOW_PREBUILT=1 opts in to a pinned, checksum-gated release asset (not yet published for 0.1.0).
+
+REPO_ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+BIN_OUT="$HOME/.local/bin/omacom-engine"
+
+if command -v go >/dev/null 2>&1; then
+  echo "Building omacom-engine from $REPO_ROOT/cmd/omacom-engine ..."
+  mkdir -p "$(dirname "$BIN_OUT")"
+  (cd "$REPO_ROOT" && go build -o "$BIN_OUT" ./cmd/omacom-engine)
+  echo "Built $BIN_OUT — run with: $BIN_OUT --port 53318"
+  exit 0
+fi
+
+if [ "${OMACOM_ALLOW_PREBUILT:-0}" = "1" ]; then
+  echo "Prebuilt path requested but no release asset yet for 0.1.0 — install Go (pacman -S go) and re-run." >&2
+  exit 1
+fi
+
+echo "Go not found. Install Go to build from source:" >&2
+echo "  pacman -S go   # or yay -S go" >&2
+echo "Then re-run: $REPO_ROOT/bin/omacom-setup" >&2
+echo "Or opt in to prebuilt (when published): OMACOM_ALLOW_PREBUILT=1 $REPO_ROOT/bin/omacom-setup" >&2
+exit 1
