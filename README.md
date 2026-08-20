@@ -2,7 +2,7 @@
 
 Push-to-talk intercom for Omarchy Quattro. A bar widget + local daemon that streams Opus audio over your LAN or Tailscale network — hold to talk, release to listen. No cloud, no accounts.
 
-Built for the [Omarchy Plugin Competition](https://omarchy.org/news/2026/08/the-first-plugin-competition) (Aug 19–24). Ships alongside `bw-vault` as a second entry. Like all Omarchy plugins, it runs unsandboxed — review the source before trusting it.
+Like all Omarchy plugins, it runs unsandboxed — review the source before trusting it.
 
 ## What it is
 
@@ -117,7 +117,7 @@ rm -f "$XDG_RUNTIME_DIR/omacom.sock"
 
 * Audio is captured from PipeWire while PTT is held and sent as Opus UDP to discovered peers on `53318`. Peers are discovered via UDP broadcast — anyone on your LAN/Tailscale can announce themselves. Don't use it on untrusted networks without Tailscale/WireGuard.
 * The daemon is a normal user process, not privileged. It never runs `sudo`.
-* This is an MVP for competition — no end-to-end encryption yet. Use Tailscale if you need it over the internet.
+* This is an MVP — no end-to-end encryption yet. Use Tailscale if you need it over the internet.
 * Like all Omarchy plugins, this runs unsandboxed with your user permissions. Review `Service.qml`, `BarWidget.qml`, and `cmd/omacom-engine/` before trusting it.
 
 ## Development
