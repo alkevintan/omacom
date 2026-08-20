@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "com.aktivesolutions.omacom",
   "name": "Omacom",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "keboy",
   "license": "MIT",
   "description": "Push-to-talk intercom over LAN / Tailscale — bar widget + local daemon, hold to talk without leaving your workflow.",

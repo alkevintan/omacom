@@ -4,15 +4,13 @@ Push-to-talk intercom for Omarchy Quattro. A bar widget + local daemon that stre
 
 Built for the [Omarchy Plugin Competition](https://omarchy.org/news/2026/08/the-first-plugin-competition) (Aug 19–24). Ships alongside `bw-vault` as a second entry. Like all Omarchy plugins, it runs unsandboxed — review the source before trusting it.
 
-![Omacom bar widget](preview.png)
-
 ## What it is
 
 * **Bar widget** — shows intercom status (peers on `:53318` / talking), hold left-click (or Space) to talk, right-click for peer panel (coming).
 * **Service** — owns the `omacom-engine` daemon lifecycle. The daemon does the audio/UDP work; QML only reflects state and forwards PTT so no secrets sit in the shell process.
 * **Local daemon** (`cmd/omacom-engine`) — Go binary you build from the checkout's source. Speaks UDP broadcast + Opus on `53318` by default on your LAN/Tailscale. Unix socket at `$XDG_RUNTIME_DIR/omacom.sock` between daemon and shell. No TCP internet listener by default.
 
-**Scope (0.1.0 MVP):** Local network only. Hold-to-talk between two Omarchy machines on the same LAN or Tailscale. No global relay, no history, no encryption beyond what Tailscale/WireGuard already gives you. This keeps the security baseline clean for competition judging.
+**Scope (0.1.1):** Local network PTT intercom. Hold-to-talk between Omarchy machines on LAN / Tailscale via UDP broadcast + raw s16le@48k (PipeWire `pw-cat`/`parec`/`arecord` capture → UDP → `pw-cat`/`paplay` playback). No global relay, no history, no E2E encryption yet — use Tailscale/WireGuard for internet. Keeps security baseline clean.
 
 ## Requirements
 
@@ -108,10 +106,10 @@ omarchy-shell shell call com.aktivesolutions.omacom state
 Structure:
 
 ```
-manifest.json          # id: com.aktivesolutions.omacom, 0.1.0, bar-widget + service
-BarWidget.qml          # bar icon, hold-to-talk, peer count
-Service.qml            # daemon lifecycle + IPC
-cmd/omacom-engine/     # Go daemon — UDP + Opus (stub for 0.1.0, build from checkout)
+manifest.json          # id: com.aktivesolutions.omacom, 0.1.1, bar-widget + service
+BarWidget.qml          # bar icon, hold-to-talk, peer count + Space PTT
+Service.qml            # daemon lifecycle, unix-socket IPC, peer polling
+cmd/omacom-engine/     # Go daemon — UDP discovery + audio (PipeWire/Opus, build from checkout)
 bin/omacom-setup       # build script — go build from source, no download by default
 ```
 
