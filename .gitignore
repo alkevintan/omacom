@@ -1,2 +1,4 @@
-omacom-engine
+# built binary, not source
+/omacom-engine
+/cmd/omacom-engine/omacom-engine
 /.local/
