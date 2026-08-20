@@ -66,20 +66,21 @@ omarchy-shell shell call com.aktivesolutions.omacom toggleAvailable     # interc
 
 ### Keybindings — push-to-talk
 
+Cross-checked against Omarchy `quattro` defaults (`default/hypr/bindings/*.lua`) — all three are free. `SUPER + CTRL + I` is already used for "Toggle locking on idle", but `SUPER + I` / `SHIFT+I` / `ALT+I` are not.
+
 Add to `~/.config/hypr/bindings.lua` (Omarchy's Hyprland config):
 
 ```lua
--- Hold SUPER+I to talk (press → start, release → stop) — best for PTT
- o.bind("SUPER + I", "Omacom PTT", "omarchy-shell shell call com.aktivesolutions.omacom startTalking")
--- Hyprland release binding (if your Omarchy build exposes bindr, use it; otherwise toggle is more reliable):
--- o.bindr("SUPER + I", "Omacom PTT release", "omarchy-shell shell call com.aktivesolutions.omacom stopTalking")
--- Simple toggle if you don't have bindr — press once to talk, again to stop:
+-- Hold SUPER+I to talk (press → start, release → stop) — uses Omarchy's release flag like voxtype's F9 PTT
+ o.bind("SUPER + I", "Omacom PTT start", "omarchy-shell shell call com.aktivesolutions.omacom startTalking")
+ o.bind("SUPER + I", "Omacom PTT stop", "omarchy-shell shell call com.aktivesolutions.omacom stopTalking", { release = true })
+-- Simple toggle if you prefer press-once (no hold) — works even without release:
  o.bind("SUPER + SHIFT + I", "Omacom toggle talk", "omarchy-shell shell call com.aktivesolutions.omacom toggleTalking")
--- Toggle intercom availability (do-not-disturb)
+-- Toggle intercom availability (do-not-disturb, like turning off the intercom)
  o.bind("SUPER + ALT + I", "Omacom availability", "omarchy-shell shell call com.aktivesolutions.omacom toggleAvailable")
 ```
 
-If `o.bindr` is not available in your Omarchy build, use the toggle (`SUPER+SHIFT+I`) — it flips talking without needing a release event. Raw Hyprland fallback:
+Raw Hyprland fallback (if you bypass `o.bind`):
 
 ```ini
 # ~/.config/hypr/hyprland.conf
