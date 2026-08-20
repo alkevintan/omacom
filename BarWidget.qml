@@ -23,6 +23,7 @@ BarWidget {
   readonly property bool daemonUp: svc ? svc.daemonUp : false
   readonly property int peerCount: svc ? svc.peerCount : 0
   readonly property bool talking: svc ? svc.talking : false
+  readonly property bool available: svc ? (svc.available !== false) : true
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -31,12 +32,15 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // nf-md-bullhorn (0xF0E6F) — intercom/broadcast
-    text: root.talking ? "󰸞" : "󰸢"
-    tooltipText: root.daemonUp
-      ? (root.talking ? "Omacom — talking (release to stop)" : "Omacom — " + root.peerCount + " peer(s) on :" + root.discoveryPort + " — hold to talk")
-      : "Omacom — daemon not running (click to start)"
+    // nf-md-bullhorn (0xF0E6F) — intercom/broadcast, slash when unavailable (like turning off intercom)
+    text: !root.available ? "󰸣" : (root.talking ? "󰸞" : "󰸢")
+    tooltipText: !root.available
+      ? "Omacom — unavailable (intercom off) — right-click to go available"
+      : root.daemonUp
+        ? (root.talking ? "Omacom — talking (release to stop)" : "Omacom — " + root.peerCount + " peer(s) on :" + root.discoveryPort + " — hold to talk · right-click to go unavailable")
+        : "Omacom — daemon not running (click to start)"
     slotSize: Style.bar.statusSlot
+    opacity: !root.available ? 0.45 : 1.0
     // Visual feedback while transmitting — uses bar accent, not menu tokens
     // so it stays visible on every theme (like 1Passchy's selectedFill).
     property color baseFg: root.bar ? root.bar.foreground : Color.foreground
@@ -45,13 +49,17 @@ BarWidget {
     onPressed: function(buttonCode) {
       if (!root.bar || !root.bar.shell) return
       if (buttonCode === Qt.LeftButton) {
+        if (!root.available) return // unavailable = PTT disabled
         if (svc && typeof svc.startTalking === "function") svc.startTalking()
       } else if (buttonCode === Qt.RightButton) {
-        if (svc && typeof svc.togglePanel === "function") svc.togglePanel()
+        if (svc && typeof svc.toggleAvailable === "function") svc.toggleAvailable()
+        else if (svc && typeof svc.togglePanel === "function") svc.togglePanel()
+      } else if (buttonCode === Qt.MiddleButton) {
+        if (svc && typeof svc.toggleAvailable === "function") svc.toggleAvailable()
       }
     }
     onReleased: function(buttonCode) {
-      if (buttonCode === Qt.LeftButton && svc && typeof svc.stopTalking === "function") svc.stopTalking()
+      if (buttonCode === Qt.LeftButton && root.available && svc && typeof svc.stopTalking === "function") svc.stopTalking()
     }
   }
 

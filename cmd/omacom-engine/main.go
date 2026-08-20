@@ -46,11 +46,12 @@ type daemon struct {
 	socketPath string
 	udpPort    int
 
-	mu       sync.Mutex
-	peers    map[string]time.Time // ip string -> last hello
-	talking  bool
-	audioCmd *exec.Cmd
-	udpConn  *net.UDPConn
+	mu        sync.Mutex
+	peers     map[string]time.Time // ip string -> last hello
+	talking   bool
+	available bool // intercom power — false = do not broadcast hello, ignore audio
+	audioCmd  *exec.Cmd
+	udpConn   *net.UDPConn
 }
 
 func main() {
@@ -70,6 +71,7 @@ func main() {
 		socketPath: *socket,
 		udpPort:    *port,
 		peers:      make(map[string]time.Time),
+		available: true,
 	}
 	if err := d.run(); err != nil {
 		log.Fatalf("omacom-engine: %v", err)
@@ -116,6 +118,12 @@ func (d *daemon) broadcastLoop() {
 }
 
 func (d *daemon) broadcastHello() error {
+	d.mu.Lock()
+	available := d.available
+	d.mu.Unlock()
+	if !available {
+		return nil
+	}
 	// Send to global broadcast + per-interface broadcasts.
 	addrs := []string{"255.255.255.255"}
 	if ifs, err := net.Interfaces(); err == nil {
@@ -171,6 +179,12 @@ func (d *daemon) udpReadLoop() {
 
 func (d *daemon) handleUDP(payload []byte, raddr *net.UDPAddr) {
 	s := string(payload)
+	d.mu.Lock()
+	available := d.available
+	d.mu.Unlock()
+	if !available {
+		return
+	}
 	if s == helloMagic {
 		d.mu.Lock()
 		d.peers[raddr.IP.String()] = time.Now()
@@ -178,7 +192,7 @@ func (d *daemon) handleUDP(payload []byte, raddr *net.UDPAddr) {
 		return
 	}
 	if strings.HasPrefix(s, audioMagic) {
-		// Audio packet — play it if not talking (avoid echo).
+		// Audio packet — play it if not talking (avoid echo) and if available.
 		d.mu.Lock()
 		talking := d.talking
 		d.mu.Unlock()
@@ -280,7 +294,7 @@ func (d *daemon) handleConn(c net.Conn) {
 		switch req["op"] {
 		case "startTalking":
 			d.mu.Lock()
-			if !d.talking {
+			if !d.talking && d.available {
 				d.talking = true
 				go d.startCapture()
 			}
@@ -295,6 +309,26 @@ func (d *daemon) handleConn(c net.Conn) {
 			if cmd != nil && cmd.Process != nil {
 				_ = cmd.Process.Kill()
 				_ = cmd.Wait()
+			}
+			d.replyPeers(c)
+		case "setAvailable":
+			v := strings.ToLower(req["value"])
+			on := v == "true" || v == "1" || v == "on"
+			d.mu.Lock()
+			d.available = on
+			if !on {
+				d.talking = false
+				// Clear peers so UI shows 0 while unavailable, and stop announcing
+				d.peers = make(map[string]time.Time)
+				cmd := d.audioCmd
+				d.audioCmd = nil
+				d.mu.Unlock()
+				if cmd != nil && cmd.Process != nil {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+				}
+			} else {
+				d.mu.Unlock()
 			}
 			d.replyPeers(c)
 		case "getPeers", "state":
@@ -317,8 +351,9 @@ func (d *daemon) replyPeers(c net.Conn) {
 		peers = append(peers, peer{IP: ip, LastSeen: last})
 	}
 	talking := d.talking
+	available := d.available
 	d.mu.Unlock()
-	d.reply(c, map[string]any{"peers": peers, "talking": talking})
+	d.reply(c, map[string]any{"peers": peers, "talking": talking, "available": available})
 }
 
 func (d *daemon) startCapture() {

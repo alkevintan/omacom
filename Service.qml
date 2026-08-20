@@ -23,6 +23,7 @@ Service {
   property bool daemonUp: false
   property int peerCount: 0
   property bool talking: false
+  property bool available: true
   property string lastError: ""
   property var peers: []
 
@@ -69,8 +70,12 @@ Service {
 
   function sendOp(op) {
     if (!root.daemonUp) { root.ensureDaemon(); return }
+    // Support op with payload like setAvailable:true
+    var json = op.indexOf(":") !== -1
+      ? "{\"op\":\"" + op.split(":")[0] + "\",\"value\":" + op.split(":")[1] + "}"
+      : "{\"op\":\"" + op + "\"}"
     socketProc.op = op
-    socketProc.command = ["sh", "-c", "printf '{\"op\":\"" + op + "\"}\\n' | socat -t1 - UNIX-CONNECT:" + root.socketPath + " 2>/dev/null || printf '{\"op\":\"" + op + "\"}\\n' | nc -U " + root.socketPath + " 2>/dev/null || true"]
+    socketProc.command = ["sh", "-c", "printf '" + json + "\\n' | socat -t1 - UNIX-CONNECT:" + root.socketPath + " 2>/dev/null || printf '" + json + "\\n' | nc -U " + root.socketPath + " 2>/dev/null || true"]
     socketProc.running = true
   }
 
@@ -82,6 +87,14 @@ Service {
   function stopTalking() {
     root.talking = false
     root.sendOp("stopTalking")
+  }
+
+  function toggleAvailable() {
+    root.available = !root.available
+    if (!root.available) root.talking = false
+    root.sendOp(root.available ? "setAvailable:true" : "setAvailable:false")
+    // Refresh peers immediately so bar tooltip updates
+    Qt.callLater(function() { root.refreshPeers() })
   }
 
   function togglePanel() {
@@ -108,6 +121,7 @@ Service {
       daemonUp: root.daemonUp,
       peerCount: root.peerCount,
       talking: root.talking,
+      available: root.available,
       peers: root.peers,
       socketPath: root.socketPath,
       discoveryPort: root.discoveryPort,
@@ -121,6 +135,8 @@ Service {
     function startTalking(): void { root.startTalking() }
     function stopTalking(): void { root.stopTalking() }
     function getPeers(): string { root.refreshPeers(); return root.state() }
+    function toggleAvailable(): void { root.toggleAvailable() }
+    function setAvailable(v: bool): void { root.available = !!v; root.sendOp(v ? "setAvailable:true" : "setAvailable:false") }
   }
 
   // -- Processes -----------------------------------------------------------
@@ -189,6 +205,7 @@ Service {
           root.peerCount = j.peers.length
         }
         if (j.talking !== undefined) root.talking = !!j.talking
+        if (j.available !== undefined) root.available = !!j.available
         root.daemonUp = true
         root.lastError = ""
       } catch(e) {
