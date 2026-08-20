@@ -17,7 +17,6 @@ Built for the [Omarchy Plugin Competition](https://omarchy.org/news/2026/08/the-
 * Omarchy Quattro (Quickshell)
 * `pipewire` / `wireplumber` (already on Omarchy) + `opus` (for the daemon)
 * Go 1.22+ **only if you want to build the daemon locally** (recommended — see below)
-* `wl-clipboard` not required — this is audio, not clipboard
 
 Install dependencies manually so you can audit what's installed:
 
