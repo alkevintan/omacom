@@ -45,6 +45,57 @@ Item {
   property bool available: true
   property string lastError: ""
   property var peers: []
+  // Call-signs of remote peers currently on air (daemon talkHold window).
+  property var talkers: []
+  // Roster UI (BarWidget panel) reads these via serviceFor(); the panel
+  // lifecycle itself lives in the widget, per Omarchy's bluetooth/network
+  // convention.
+
+  // The daemon owns call-sign assignment: it rolls a random word on first
+  // run and remembers it in $XDG_STATE_HOME/omacom/callsign. We mirror what
+  // it reports; the plugin setting is only a startup override.
+  property string daemonCallSign: ""
+  readonly property string configuredCallSign: root.sanitizeCallSign(root.setting("callSign", ""))
+  readonly property string callSign: root.daemonCallSign || root.configuredCallSign
+
+  // Mirror of the daemon's sanitizeCallSign — strip framing/control chars so
+  // a name can neither forge a packet field nor smuggle shell syntax.
+  function sanitizeCallSign(name) {
+    var out = String(name === undefined || name === null ? "" : name)
+      .replace(/[|\r\n\x00-\x1f]/g, "")
+      .replace(/['"\\`$]/g, "")
+      .trim()
+    return out.length > 32 ? out.slice(0, 32) : out
+  }
+
+  // Everyone currently on air — self first when talking, then remote talkers.
+  readonly property var activeTalkers: {
+    var list = []
+    if (root.talking && root.available) list.push(root.callSign || "me")
+    var t = Array.isArray(root.talkers) ? root.talkers : []
+    for (var i = 0; i < t.length; i++) {
+      if (list.indexOf(String(t[i])) === -1) list.push(String(t[i]))
+    }
+    return list
+  }
+  // Bar label: the call-sign when exactly one person talks, a counter when
+  // several do, empty when the intercom is quiet.
+  readonly property string talkDisplay: root.activeTalkers.length === 0 ? ""
+    : root.activeTalkers.length === 1 ? root.activeTalkers[0]
+    : "×" + root.activeTalkers.length
+  readonly property bool anyoneTalking: root.activeTalkers.length > 0
+
+  // Roster rows for the dropdown — self first, then discovered peers.
+  readonly property var roster: {
+    var rows = [{ name: root.callSign || "me", self: true, talking: root.talking && root.available }]
+    var ps = Array.isArray(root.peers) ? root.peers : []
+    for (var i = 0; i < ps.length; i++) {
+      var p = ps[i] || {}
+      var name = p.callSign ? String(p.callSign) : (p.ip ? String(p.ip) : "?")
+      rows.push({ name: name, self: false, talking: root.talkers.indexOf(name) !== -1 })
+    }
+    return rows
+  }
 
   // Op/poll ordering: timestamps let a poll response that was already in
   // flight before an op was sent get discarded instead of reverting the
@@ -76,9 +127,20 @@ Item {
     probeProc.running = true
   }
 
+  // What the live daemon was actually launched with — a settings edit that
+  // changes either of these needs a restart, not just a new binding.
+  property string _runningSocket: ""
+  property int _runningPort: 0
+
   function startDaemon() {
     if (daemonProc.running) return
-    daemonProc.command = [root.engineBin, "--socket", root.socketPath, "--port", String(root.discoveryPort)]
+    root._runningSocket = root.socketPath
+    root._runningPort = root.discoveryPort
+    var args = [root.engineBin, "--socket", root.socketPath, "--port", String(root.discoveryPort)]
+    // Only an explicit setting is passed through; with no flag the daemon
+    // restores its persisted call-sign or rolls a new one.
+    if (root.configuredCallSign) args.push("--callsign", root.configuredCallSign)
+    daemonProc.command = args
     daemonProc.running = true
   }
 
@@ -87,22 +149,60 @@ Item {
     root.daemonUp = false
     root.peerCount = 0
     root.talking = false
+    root.talkers = []
+  }
+
+  function restartDaemon() {
+    root.stopDaemon()
+    restartTimer.restart()
+  }
+
+  Timer {
+    id: restartTimer
+    interval: 250
+    onTriggered: root.ensureDaemon()
+  }
+
+  // Settings reach the service through the bar widget (the shell injects them
+  // into widgets, not services), so they can land after the daemon is already
+  // up. React rather than assume they were known at startup.
+  onSocketPathChanged: root._applyTransportSettings()
+  onDiscoveryPortChanged: root._applyTransportSettings()
+  onConfiguredCallSignChanged: {
+    if (root.configuredCallSign && root.daemonUp && root.configuredCallSign !== root.daemonCallSign)
+      root.setCallSign(root.configuredCallSign)
+  }
+
+  function _applyTransportSettings() {
+    if (!daemonProc.running) return
+    if (root.socketPath === root._runningSocket && root.discoveryPort === root._runningPort) return
+    root.restartDaemon()
   }
 
   // -- PTT over unix socket (via socat/nc) --------------------------------
   // QML can't hold a persistent socket, so we shell out per PTT edge. Payloads
   // are tiny JSON, bounded, with a 1s deadline.
 
-  function sendOp(op) {
+  // Single-quote a string for `sh -c`. Every value that reaches the shell
+  // goes through here — call-signs are user text and must never be able to
+  // close the quote and append a command.
+  function shQuote(s) {
+    return "'" + String(s).split("'").join("'\\''") + "'"
+  }
+
+  function sendOp(op, value) {
     if (!root.daemonUp) { root.ensureDaemon(); return }
-    // Support op with payload like setAvailable:true — value must be a JSON
-    // string; the daemon coerces with strings.ToLower(req["value"])
-    var json = op.indexOf(":") !== -1
-      ? "{\"op\":\"" + op.split(":")[0] + "\",\"value\":\"" + op.split(":")[1] + "\"}"
-      : "{\"op\":\"" + op + "\"}"
+    var req = { op: String(op) }
+    // The daemon takes "value" as a JSON string and coerces it per-op.
+    if (value !== undefined && value !== null) req.value = String(value)
+    var payload = root.shQuote(JSON.stringify(req))
     socketProc.op = op
     root._lastOpSent = Date.now()
-    socketProc.command = ["sh", "-c", "printf '" + json + "\\n' | socat -t1 - UNIX-CONNECT:" + root.socketPath + " 2>/dev/null || printf '" + json + "\\n' | nc -U " + root.socketPath + " 2>/dev/null || true"]
+    // printf '%s\n' keeps the payload literal — no % or backslash expansion.
+    var sock = root.shQuote(root.socketPath)
+    socketProc.command = ["sh", "-c",
+      "printf '%s\\n' " + payload + " | socat -t1 - UNIX-CONNECT:" + sock + " 2>/dev/null"
+      + " || printf '%s\\n' " + payload + " | nc -U " + sock + " 2>/dev/null || true"]
     socketProc.running = true
   }
 
@@ -126,15 +226,35 @@ Item {
   function toggleAvailable() {
     root.available = !root.available
     if (!root.available) root.talking = false
-    root.sendOp(root.available ? "setAvailable:true" : "setAvailable:false")
+    root.sendOp("setAvailable", root.available ? "true" : "false")
     // socketProc.onExited triggers refreshPeers once the op has landed —
     // polling earlier would read the old state and revert the toggle.
   }
 
+  // Rename this station. An empty name asks the daemon to roll a fresh word.
+  function setCallSign(name) {
+    var clean = root.sanitizeCallSign(name)
+    // Optimistic so the panel field settles immediately; the poll response
+    // carries the daemon's final answer (it may re-roll on a clash).
+    if (clean) root.daemonCallSign = clean
+    root.sendOp("setCallSign", clean)
+  }
+
+  function rerollCallSign() {
+    root.sendOp("setCallSign", "")
+  }
+
   function togglePanel() {
-    // Future: open peer list panel. For now flip talking as demo if daemon down.
-    if (!root.daemonUp) root.ensureDaemon()
-    else root.talking = !root.talking
+    // Panel lifecycle lives in the bar widget (Ui.Panel). Summon it through
+    // the generic shell IPC, which routes to the focused monitor's instance:
+    //   omarchy-shell shell toggle com.aktivesolutions.omacom
+    if (root.shell && typeof root.shell.summon === "function") {
+      root.shell.summon("com.aktivesolutions.omacom")
+      return
+    }
+    // Fallback when the shell handle is missing: refresh so the widget at
+    // least shows a fresh roster when it does open.
+    root.refreshPeers()
   }
 
   function refreshPeers() {
@@ -152,13 +272,17 @@ Item {
 
   // -- Introspection -------------------------------------------------------
 
-  function state() {
+  function stateJson() {
     return JSON.stringify({
       daemonUp: root.daemonUp,
       peerCount: root.peerCount,
       talking: root.talking,
       available: root.available,
       peers: root.peers,
+      callSign: root.callSign,
+      talkers: root.talkers,
+      activeTalkers: root.activeTalkers,
+      talkDisplay: root.talkDisplay,
       socketPath: root.socketPath,
       discoveryPort: root.discoveryPort,
       lastError: root.lastError
@@ -167,13 +291,16 @@ Item {
 
   IpcHandler {
     target: "com.aktivesolutions.omacom"
-    function state(): string { return root.state() }
+    function state(): string { return root.stateJson() }
     function startTalking(): void { root.startTalking() }
     function stopTalking(): void { root.stopTalking() }
     function toggleTalking(): void { root.toggleTalking() }
-    function getPeers(): string { root.refreshPeers(); return root.state() }
+    function getPeers(): string { root.refreshPeers(); return root.stateJson() }
     function toggleAvailable(): void { root.toggleAvailable() }
-    function setAvailable(v: bool): void { root.available = !!v; root.sendOp(v ? "setAvailable:true" : "setAvailable:false") }
+    function setAvailable(v: bool): void { root.available = !!v; root.sendOp("setAvailable", v ? "true" : "false") }
+    function setCallSign(name: string): string { root.setCallSign(name); return root.callSign }
+    function rerollCallSign(): void { root.rerollCallSign() }
+    function togglePanel(): void { root.togglePanel() }
   }
 
   // -- Processes -----------------------------------------------------------
@@ -224,7 +351,12 @@ Item {
     onExited: function(exitCode) {
       // PTT is best-effort; peer poll will correct talking state
       if (socketOut.text) {
-        try { var j = JSON.parse(String(socketOut.text)); if (j.talking !== undefined) root.talking = !!j.talking } catch(e) {}
+        try {
+          var j = JSON.parse(String(socketOut.text))
+          if (j.talking !== undefined) root.talking = !!j.talking
+          if (j.callSign !== undefined) root.daemonCallSign = String(j.callSign)
+          if (Array.isArray(j.talkers)) root.talkers = j.talkers
+        } catch(e) {}
       }
       // The op has landed — refresh so the UI reflects the daemon's state
       root.refreshPeers()
@@ -246,8 +378,10 @@ Item {
           root.peers = j.peers
           root.peerCount = j.peers.length
         }
+        root.talkers = Array.isArray(j.talkers) ? j.talkers : []
         if (j.talking !== undefined) root.talking = !!j.talking
         if (j.available !== undefined) root.available = !!j.available
+        if (j.callSign !== undefined) root.daemonCallSign = String(j.callSign)
         root.daemonUp = true
         root.lastError = ""
       } catch(e) {

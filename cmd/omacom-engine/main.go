@@ -10,7 +10,19 @@ package main
 //
 // IPC: unix socket at $XDG_RUNTIME_DIR/omacom.sock — QML Service writes
 // {"op":"startTalking"} / {"op":"stopTalking"} / {"op":"getPeers"} as newline
-// JSON. We reply with {"peers":[...],"talking":bool} where needed.
+// JSON. We reply with {"peers":[...],"talkers":[...],"talking":bool,
+// "callSign":"..."} where needed.
+//
+// Call-signs: each daemon announces a call-sign. With no --callsign flag it
+// rolls a random word (see callsign.go) and remembers it in
+// $XDG_STATE_HOME/omacom/callsign, so a station keeps its handle across
+// restarts and the hostname never hits the wire. It can be renamed at runtime
+// with {"op":"setCallSign","value":"Falcon"} (empty value re-rolls).
+// Hello packets carry "omacom-hello-v1|<call-sign>|<talking01>";
+// PTT edges broadcast "omacom-onair-v1|<call-sign>" / "omacom-offair-v1|..."
+// 3x so peers can show who is on air immediately. A peer counts as talking
+// for talkHold after its last claim. Bare legacy hellos are still accepted
+// (peer shown by IP); audio packet format is unchanged.
 //
 // Discovery: UDP broadcast every 2s to 255.255.255.255:port and to each
 // interface's broadcast addr. Peers expire after 10s. No global relay, only
@@ -32,32 +44,57 @@ import (
 )
 
 const (
-	maxUDP     = 2048
-	helloMagic = "omacom-hello-v1"
-	audioMagic = "omacom-audio-v1|"
+	maxUDP      = 2048
+	helloMagic  = "omacom-hello-v1"
+	audioMagic  = "omacom-audio-v1|"
+	onAirMagic  = "omacom-onair-v1|"
+	offAirMagic = "omacom-offair-v1|"
+	// A peer counts as "talking" this long after its last on-air/hello claim.
+	talkHold = 3 * time.Second
 )
 
 type peer struct {
 	IP       string    `json:"ip"`
+	CallSign string    `json:"callSign,omitempty"`
 	LastSeen time.Time `json:"lastSeen"`
+	LastTalk time.Time `json:"-"`
 }
 
 type daemon struct {
 	socketPath string
 	udpPort    int
+	callSign   string
 
-	mu        sync.Mutex
-	peers     map[string]time.Time // ip string -> last hello
-	talking   bool
-	available bool // intercom power — false = do not broadcast hello, ignore audio
-	audioCmd  *exec.Cmd
-	udpConn   *net.UDPConn
+	mu           sync.Mutex
+	callSignAuto bool             // rolled by us, so a clash may be re-rolled
+	peers        map[string]*peer // ip string -> peer info
+	talking      bool
+	available    bool // intercom power — false = do not broadcast hello, ignore audio
+	audioCmd     *exec.Cmd
+	udpConn      *net.UDPConn
+}
+
+// sanitizeCallSign strips separators/control chars so a call-sign can never
+// forge packet framing (fields are "|" delimited) and stays one short line.
+func sanitizeCallSign(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '|' || r == '\n' || r == '\r' || r < 0x20 {
+			return -1
+		}
+		return r
+	}, s)
+	s = strings.TrimSpace(s)
+	if len(s) > 32 {
+		s = string([]rune(s)[:32])
+	}
+	return s
 }
 
 func main() {
 	var (
-		socket = flag.String("socket", "", "unix socket path (default $XDG_RUNTIME_DIR/omacom.sock)")
-		port   = flag.Int("port", 53318, "discovery/audio UDP port")
+		socket   = flag.String("socket", "", "unix socket path (default $XDG_RUNTIME_DIR/omacom.sock)")
+		port     = flag.Int("port", 53318, "discovery/audio UDP port")
+		callsign = flag.String("callsign", "", "call-sign announced to peers (default hostname)")
 	)
 	flag.Parse()
 	if *socket == "" {
@@ -67,11 +104,26 @@ func main() {
 			*socket = "/tmp/omacom.sock"
 		}
 	}
+	// Explicit flag wins; then whatever this machine was called last time;
+	// otherwise roll a word and remember it.
+	cs := sanitizeCallSign(*callsign)
+	auto := false
+	if cs == "" {
+		cs = loadCallSign()
+		auto = true
+	}
+	if cs == "" {
+		cs = randomCallSign(nil)
+		saveCallSign(cs)
+		log.Printf("assigned call-sign %q (change it in the Omacom panel)", cs)
+	}
 	d := &daemon{
-		socketPath: *socket,
-		udpPort:    *port,
-		peers:      make(map[string]time.Time),
-		available: true,
+		socketPath:   *socket,
+		udpPort:      *port,
+		callSign:     cs,
+		callSignAuto: auto,
+		peers:        make(map[string]*peer),
+		available:    true,
 	}
 	if err := d.run(); err != nil {
 		log.Fatalf("omacom-engine: %v", err)
@@ -146,7 +198,17 @@ func (d *daemon) broadcastHello() error {
 			}
 		}
 	}
-	msg := []byte(helloMagic)
+	// Hello carries call-sign and current talking state so peers can show
+	// who is on air even if an on-air edge packet was lost (UDP).
+	talkByte := byte('0')
+	d.mu.Lock()
+	if d.talking {
+		talkByte = '1'
+	}
+	cs := d.callSign
+	d.mu.Unlock()
+	msg := append([]byte(helloMagic+"|"), []byte(cs+"|")...)
+	msg = append(msg, talkByte)
 	for _, a := range addrs {
 		raddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", a, d.udpPort))
 		if err != nil {
@@ -185,26 +247,73 @@ func (d *daemon) handleUDP(payload []byte, raddr *net.UDPAddr) {
 	if !available {
 		return
 	}
-	if s == helloMagic {
+	ip := raddr.IP.String()
+	now := time.Now()
+	switch {
+	case s == helloMagic:
+		// Legacy peer without a call-sign — still counts as joined.
 		d.mu.Lock()
-		d.peers[raddr.IP.String()] = time.Now()
+		if p, ok := d.peers[ip]; ok {
+			p.LastSeen = now
+		} else {
+			d.peers[ip] = &peer{IP: ip, LastSeen: now}
+		}
 		d.mu.Unlock()
-		return
-	}
-	if strings.HasPrefix(s, audioMagic) {
-		// Audio packet — play it if not talking (avoid echo) and if available.
+	case strings.HasPrefix(s, helloMagic+"|"):
+		// omacom-hello-v1|<call-sign>|<talking 0|1>
+		fields := strings.SplitN(s[len(helloMagic)+1:], "|", 2)
+		cs := sanitizeCallSign(fields[0])
+		talking := len(fields) == 2 && fields[1] == "1"
 		d.mu.Lock()
-		talking := d.talking
-		d.mu.Unlock()
+		p, ok := d.peers[ip]
+		if !ok {
+			p = &peer{IP: ip}
+			d.peers[ip] = p
+		}
+		p.CallSign = cs
+		p.LastSeen = now
 		if talking {
-			return
+			p.LastTalk = now
 		}
-		raw := payload[len(audioMagic):]
-		if len(raw) == 0 || len(raw) > 1800 {
-			return
+		d.mu.Unlock()
+		d.resolveCallSignClash(cs)
+	case strings.HasPrefix(s, onAirMagic):
+		cs := sanitizeCallSign(s[len(onAirMagic):])
+		d.mu.Lock()
+		p, ok := d.peers[ip]
+		if !ok {
+			p = &peer{IP: ip}
+			d.peers[ip] = p
 		}
-		go d.playAudio(raw)
-		return
+		p.CallSign = cs
+		p.LastSeen = now
+		p.LastTalk = now
+		d.mu.Unlock()
+	case strings.HasPrefix(s, offAirMagic):
+		cs := sanitizeCallSign(s[len(offAirMagic):])
+		d.mu.Lock()
+		// Clear by IP and by call-sign in case the peer's address changed.
+		for _, p := range d.peers {
+			if p.IP == ip || (cs != "" && p.CallSign == cs) {
+				p.LastTalk = time.Time{}
+			}
+		}
+		d.mu.Unlock()
+	default:
+		if strings.HasPrefix(s, audioMagic) {
+			// Audio packet — play it if not talking (avoid echo) and if available.
+			d.mu.Lock()
+			talking := d.talking
+			d.mu.Unlock()
+			if talking {
+				return
+			}
+			raw := payload[len(audioMagic):]
+			if len(raw) == 0 || len(raw) > 1800 {
+				return
+			}
+			go d.playAudio(raw)
+		}
 	}
 }
 
@@ -255,8 +364,8 @@ func (d *daemon) reapLoop() {
 	for range t.C {
 		cutoff := time.Now().Add(-10 * time.Second)
 		d.mu.Lock()
-		for ip, last := range d.peers {
-			if last.Before(cutoff) {
+		for ip, p := range d.peers {
+			if p.LastSeen.Before(cutoff) {
 				delete(d.peers, ip)
 			}
 		}
@@ -298,11 +407,13 @@ func (d *daemon) handleConn(c net.Conn) {
 			if !d.talking && d.available {
 				d.talking = true
 				go d.startCapture()
+				go d.announceTalk(true)
 			}
 			d.mu.Unlock()
 			d.replyPeers(c)
 		case "stopTalking":
 			d.mu.Lock()
+			wasTalking := d.talking
 			d.talking = false
 			cmd := d.audioCmd
 			d.audioCmd = nil
@@ -310,6 +421,9 @@ func (d *daemon) handleConn(c net.Conn) {
 			if cmd != nil && cmd.Process != nil {
 				_ = cmd.Process.Kill()
 				_ = cmd.Wait()
+			}
+			if wasTalking {
+				go d.announceTalk(false)
 			}
 			d.replyPeers(c)
 		case "setAvailable":
@@ -319,9 +433,10 @@ func (d *daemon) handleConn(c net.Conn) {
 			d.mu.Lock()
 			d.available = on
 			if !on {
+				wasTalking := d.talking
 				d.talking = false
 				// Clear peers so UI shows 0 while unavailable, and stop announcing
-				d.peers = make(map[string]time.Time)
+				d.peers = make(map[string]*peer)
 				cmd := d.audioCmd
 				d.audioCmd = nil
 				d.mu.Unlock()
@@ -329,9 +444,18 @@ func (d *daemon) handleConn(c net.Conn) {
 					_ = cmd.Process.Kill()
 					_ = cmd.Wait()
 				}
+				if wasTalking {
+					go d.announceTalk(false)
+				}
 			} else {
 				d.mu.Unlock()
 			}
+			d.replyPeers(c)
+		case "setCallSign":
+			// Empty or absent value means "roll me a new one" — the panel's
+			// dice button. Only a string is a name; anything else is a typo.
+			raw, _ := req["value"].(string)
+			d.setCallSign(sanitizeCallSign(raw))
 			d.replyPeers(c)
 		case "getPeers", "state":
 			d.replyPeers(c)
@@ -346,16 +470,110 @@ func (d *daemon) reply(c net.Conn, v any) {
 	_, _ = c.Write(append(b, '\n'))
 }
 
+// setCallSign renames this station. A name the user typed is sticky: it is
+// persisted and never re-rolled behind their back. An empty name rolls a
+// fresh word (avoiding the ones already on the net) and stays auto. Either
+// way peers hear about it on the next hello, which we send immediately so
+// the roster does not lag by up to 2s.
+func (d *daemon) setCallSign(want string) {
+	d.mu.Lock()
+	if want == "" {
+		taken := make(map[string]bool, len(d.peers))
+		for _, p := range d.peers {
+			if p.CallSign != "" {
+				taken[strings.ToLower(p.CallSign)] = true
+			}
+		}
+		taken[strings.ToLower(d.callSign)] = true
+		want = randomCallSign(taken)
+		d.callSignAuto = true
+	} else {
+		d.callSignAuto = false
+	}
+	if want == d.callSign {
+		d.mu.Unlock()
+		return
+	}
+	d.callSign = want
+	talking := d.talking
+	d.mu.Unlock()
+
+	saveCallSign(want)
+	log.Printf("call-sign is now %q", want)
+	go func() {
+		_ = d.broadcastHello()
+		// Re-assert on-air identity so a mid-transmission rename does not
+		// leave the old handle lit on other rosters.
+		if talking {
+			d.announceTalk(true)
+		}
+	}()
+}
+
+// resolveCallSignClash re-rolls when another station is already using our
+// auto-assigned word. Only auto call-signs move — a name the user chose is
+// theirs to keep, clash or not.
+func (d *daemon) resolveCallSignClash(theirs string) {
+	if theirs == "" {
+		return
+	}
+	d.mu.Lock()
+	clash := d.callSignAuto && strings.EqualFold(theirs, d.callSign)
+	d.mu.Unlock()
+	if !clash {
+		return
+	}
+	log.Printf("call-sign %q is taken on this net — re-rolling", theirs)
+	d.setCallSign("")
+}
+
+// announceTalk broadcasts a PTT edge 3x — UDP is lossy and the edge is what
+// lets peers show your call-sign immediately instead of at next hello.
+func (d *daemon) announceTalk(on bool) {
+	d.mu.Lock()
+	cs := d.callSign
+	d.mu.Unlock()
+	magic := offAirMagic
+	if on {
+		magic = onAirMagic
+	}
+	msg := []byte(magic + cs)
+	for i := 0; i < 3; i++ {
+		d.sendToPeers(msg)
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
 func (d *daemon) replyPeers(c net.Conn) {
 	d.mu.Lock()
+	now := time.Now()
 	peers := make([]peer, 0, len(d.peers))
-	for ip, last := range d.peers {
-		peers = append(peers, peer{IP: ip, LastSeen: last})
+	talkers := make([]string, 0, 2)
+	seen := make(map[string]bool)
+	for _, p := range d.peers {
+		peers = append(peers, peer{IP: p.IP, CallSign: p.CallSign, LastSeen: p.LastSeen})
+		if now.Sub(p.LastTalk) < talkHold {
+			name := p.CallSign
+			if name == "" {
+				name = p.IP
+			}
+			if !seen[name] {
+				seen[name] = true
+				talkers = append(talkers, name)
+			}
+		}
 	}
 	talking := d.talking
 	available := d.available
+	callSign := d.callSign
 	d.mu.Unlock()
-	d.reply(c, map[string]any{"peers": peers, "talking": talking, "available": available})
+	d.reply(c, map[string]any{
+		"peers":     peers,
+		"talkers":   talkers,
+		"talking":   talking,
+		"available": available,
+		"callSign":  callSign,
+	})
 }
 
 func (d *daemon) startCapture() {
