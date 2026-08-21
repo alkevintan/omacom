@@ -286,12 +286,13 @@ func (d *daemon) handleConn(c net.Conn) {
 		if line == "" {
 			continue
 		}
-		var req map[string]string
+		var req map[string]any
 		if err := json.Unmarshal([]byte(line), &req); err != nil {
 			d.reply(c, map[string]string{"error": "bad json"})
 			continue
 		}
-		switch req["op"] {
+		op, _ := req["op"].(string)
+		switch op {
 		case "startTalking":
 			d.mu.Lock()
 			if !d.talking && d.available {
@@ -312,7 +313,8 @@ func (d *daemon) handleConn(c net.Conn) {
 			}
 			d.replyPeers(c)
 		case "setAvailable":
-			v := strings.ToLower(req["value"])
+			// Accept bool or string JSON values — fmt.Sprint renders both
+			v := strings.ToLower(strings.TrimSpace(fmt.Sprint(req["value"])))
 			on := v == "true" || v == "1" || v == "on"
 			d.mu.Lock()
 			d.available = on
