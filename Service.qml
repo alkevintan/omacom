@@ -6,10 +6,11 @@ import qs.Commons
 // Omacom Service — owns the omacom-engine daemon lifecycle.
 //
 // Real audio path now implemented in cmd/omacom-engine (Go):
-//   PipeWire capture (pw-cat --record) → Opus/raw s16le@48k → UDP broadcast
-//   on :53318 to discovered peers, and reverse for playback. Discovery is
-//   UDP hello every 2s, peers expire after 10s. IPC via unix socket at
-//   $XDG_RUNTIME_DIR/omacom.sock — QML only reflects state and forwards PTT.
+//   PipeWire capture (pw-cat --record --raw) → raw s16le@48k, one 20ms frame
+//   per UDP packet to discovered peers, and reverse for playback. Discovery
+//   is a hello every 2s — LAN broadcast plus unicast to tailnet peers — and
+//   peers expire after 10s. IPC via unix socket at $XDG_RUNTIME_DIR/omacom.sock
+//   — QML only reflects state and forwards PTT.
 //
 // Security: no sudo, no package install, no remote download. `bin/omacom-setup`
 // builds the daemon from the checkout's source (`go build ./cmd/omacom-engine`)
@@ -100,6 +101,16 @@ Item {
   // Op/poll ordering: timestamps let a poll response that was already in
   // flight before an op was sent get discarded instead of reverting the
   // optimistic state flip (e.g. toggleAvailable snapping back).
+  // Last line the daemon logged, for the panel and for `state`.
+  property string daemonLog: ""
+
+  function noteDaemonLog(line) {
+    var text = String(line || "").trim()
+    if (!text) return
+    root.daemonLog = text
+    console.log("omacom-engine:", text)
+  }
+
   property double _lastOpSent: 0
   property double _pollStarted: 0
 
@@ -112,6 +123,27 @@ Item {
   }
   readonly property int discoveryPort: Number(root.setting("discoveryPort", 53318))
   readonly property bool autoStart: root.setting("autoStartDaemon", true) === true
+
+  // Transport. Broadcast finds LAN peers only — it cannot cross a tunnel —
+  // so reaching a tailnet means unicasting to each peer. The daemon pulls
+  // those addresses from `tailscale status`; staticPeers adds any it can't
+  // see (a port-forwarded host, a non-Tailscale WireGuard mesh).
+  readonly property bool tailnetOnly: root.setting("tailnetOnly", false) === true
+  readonly property string staticPeers: String(root.setting("staticPeers", "")).trim()
+
+  // Everything the daemon has to be restarted for, as one comparable value.
+  readonly property string transportKey: [root.socketPath, root.discoveryPort,
+    root.tailnetOnly ? "1" : "0", root.staticPeers].join("|")
+
+  // Reported back by the daemon, for the panel to show what is in use.
+  property bool daemonTailnetOnly: false
+  property int directTargets: 0
+  readonly property string transportText: !root.daemonUp ? ""
+    : root.daemonTailnetOnly
+      ? "Tailscale only · " + root.directTargets + (root.directTargets === 1 ? " address" : " addresses")
+      : root.directTargets > 0
+        ? "LAN broadcast + " + root.directTargets + " direct"
+        : "LAN broadcast"
   readonly property string engineBin: {
     var h = Quickshell.env("HOME")
     if (h) return h + "/.local/bin/omacom-engine"
@@ -128,15 +160,15 @@ Item {
   }
 
   // What the live daemon was actually launched with — a settings edit that
-  // changes either of these needs a restart, not just a new binding.
-  property string _runningSocket: ""
-  property int _runningPort: 0
+  // changes any of it needs a restart, not just a new binding.
+  property string _runningTransport: ""
 
   function startDaemon() {
     if (daemonProc.running) return
-    root._runningSocket = root.socketPath
-    root._runningPort = root.discoveryPort
+    root._runningTransport = root.transportKey
     var args = [root.engineBin, "--socket", root.socketPath, "--port", String(root.discoveryPort)]
+    if (root.tailnetOnly) args.push("--tailnet-only")
+    if (root.staticPeers) args.push("--peers", root.staticPeers)
     // Only an explicit setting is passed through; with no flag the daemon
     // restores its persisted call-sign or rolls a new one.
     if (root.configuredCallSign) args.push("--callsign", root.configuredCallSign)
@@ -166,8 +198,7 @@ Item {
   // Settings reach the service through the bar widget (the shell injects them
   // into widgets, not services), so they can land after the daemon is already
   // up. React rather than assume they were known at startup.
-  onSocketPathChanged: root._applyTransportSettings()
-  onDiscoveryPortChanged: root._applyTransportSettings()
+  onTransportKeyChanged: root._applyTransportSettings()
   onConfiguredCallSignChanged: {
     if (root.configuredCallSign && root.daemonUp && root.configuredCallSign !== root.daemonCallSign)
       root.setCallSign(root.configuredCallSign)
@@ -175,7 +206,7 @@ Item {
 
   function _applyTransportSettings() {
     if (!daemonProc.running) return
-    if (root.socketPath === root._runningSocket && root.discoveryPort === root._runningPort) return
+    if (root.transportKey === root._runningTransport) return
     root.restartDaemon()
   }
 
@@ -285,6 +316,10 @@ Item {
       talkDisplay: root.talkDisplay,
       socketPath: root.socketPath,
       discoveryPort: root.discoveryPort,
+      tailnetOnly: root.daemonTailnetOnly,
+      directTargets: root.directTargets,
+      transport: root.transportText,
+      daemonLog: root.daemonLog,
       lastError: root.lastError
     })
   }
@@ -323,9 +358,15 @@ Item {
 
   Process {
     id: daemonProc
-    // Started on demand via startDaemon(); keepLoaded-equivalent via Service keepLoaded
-    stdout: StdioCollector { waitForEnd: false }
-    stderr: StdioCollector { waitForEnd: false }
+    // Started on demand via startDaemon(); keepLoaded-equivalent via Service keepLoaded.
+    //
+    // The daemon's log is the only account of what it did — why a call-sign
+    // was re-rolled, which peers it found, why audio was dropped. Collecting
+    // it into a buffer nobody reads makes those questions unanswerable, so
+    // each line goes to the shell's own log (journalctl --user -t omarchy-shell)
+    // and the last one is kept for the panel.
+    stdout: SplitParser { onRead: function(line) { root.noteDaemonLog(line) } }
+    stderr: SplitParser { onRead: function(line) { root.noteDaemonLog(line) } }
     onExited: function(exitCode) {
       root.daemonUp = false
       if (exitCode !== 0) root.lastError = "daemon exited " + exitCode + " — check ~/.local/bin/omacom-engine"
@@ -382,6 +423,8 @@ Item {
         if (j.talking !== undefined) root.talking = !!j.talking
         if (j.available !== undefined) root.available = !!j.available
         if (j.callSign !== undefined) root.daemonCallSign = String(j.callSign)
+        if (j.tailnetOnly !== undefined) root.daemonTailnetOnly = !!j.tailnetOnly
+        if (j.directTarget !== undefined) root.directTargets = Number(j.directTarget)
         root.daemonUp = true
         root.lastError = ""
       } catch(e) {

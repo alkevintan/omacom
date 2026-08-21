@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "com.aktivesolutions.omacom",
   "name": "Omacom",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "author": "keboy",
   "license": "MIT",
-  "description": "Push-to-talk intercom over LAN / Tailscale — bar widget + local daemon, hold ALT+SPACE to talk without leaving your workflow.",
+  "description": "Push-to-talk intercom over LAN or Tailscale — bar widget + local daemon, hold ALT+SPACE to talk without leaving your workflow.",
   "kinds": [
     "bar-widget",
     "service"
@@ -25,7 +25,9 @@
       "daemonSocket": "",
       "autoStartDaemon": true,
       "discoveryPort": 53318,
-      "callSign": ""
+      "callSign": "",
+      "tailnetOnly": false,
+      "staticPeers": ""
     },
     "schema": [
       {
@@ -53,6 +55,18 @@
         "key": "callSign",
         "type": "string",
         "label": "Call sign override (blank = auto-assigned random word)",
+        "defaultValue": ""
+      },
+      {
+        "key": "tailnetOnly",
+        "type": "boolean",
+        "label": "Tailscale only — skip LAN broadcast, refuse non-Tailscale peers",
+        "defaultValue": false
+      },
+      {
+        "key": "staticPeers",
+        "type": "string",
+        "label": "Extra peers to reach directly (comma-separated host or host:port)",
         "defaultValue": ""
       }
     ]

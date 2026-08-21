@@ -1,6 +1,6 @@
 # Omacom — Intercom over LAN / Tailscale for Omarchy
 
-Push-to-talk intercom for Omarchy Quattro. A bar widget + local daemon that streams Opus audio over your LAN or Tailscale network — hold to talk, release to listen. No cloud, no accounts.
+Push-to-talk intercom for Omarchy Quattro. A bar widget + local daemon that streams audio across your LAN, or across the internet over Tailscale — hold to talk, release to listen. No cloud, no accounts.
 
 Like all Omarchy plugins, it runs unsandboxed — review the source before trusting it.
 
@@ -8,22 +8,25 @@ Like all Omarchy plugins, it runs unsandboxed — review the source before trust
 
 * **Bar widget** — status: peer count on `:53318`, talking, availability, plus the on-air call-sign (a `×N` counter when several talk at once). Clicking opens the panel (roster + call-sign editor); push-to-talk itself is keybind-only, because Omarchy's bar can't distinguish a click from a hold.
 * **Service** — owns the `omacom-engine` daemon lifecycle. The daemon does the audio/UDP work; QML only reflects state and forwards PTT so no secrets sit in the shell process.
-* **Local daemon** (`cmd/omacom-engine`) — Go binary you build from the checkout's source. Speaks UDP broadcast + Opus on `53318` by default on your LAN/Tailscale. Unix socket at `$XDG_RUNTIME_DIR/omacom.sock` between daemon and shell. No TCP internet listener by default.
+* **Local daemon** (`cmd/omacom-engine`) — Go binary you build from the checkout's source, stdlib only. Discovery and audio over UDP `53318`; a unix socket at `$XDG_RUNTIME_DIR/omacom.sock` between daemon and shell. No TCP listener at all. Audio is raw s16le@48k mono, one 20ms frame per packet — not Opus, despite the port neighbourhood; compression is a follow-up.
 
-**Scope (0.1.5):** Local network PTT intercom. Hold-to-talk between Omarchy machines on LAN / Tailscale via UDP broadcast + raw s16le@48k (PipeWire `pw-cat`/`parec`/`arecord` capture → UDP → `pw-cat`/`paplay` playback). No global relay, no history, no E2E encryption yet — use Tailscale/WireGuard for internet. Keeps security baseline clean.
+**Scope (0.2.0):** PTT intercom for machines you already trust each other. Hold-to-talk over raw s16le@48k, one 20ms frame per UDP packet (PipeWire `pw-cat`/`parec`/`arecord` capture → UDP → `pw-cat`/`paplay` playback). LAN discovery is UDP broadcast; **over the internet it runs on Tailscale**, which supplies the encryption, the peer identity and the NAT traversal — see [Over the internet](#over-the-internet). No global relay, no history, and no application-layer encryption of its own.
 
 ## Requirements
 
 * Omarchy Quattro (Quickshell)
-* `pipewire` / `wireplumber` (already on Omarchy) + `opus` (for the daemon)
+* `pipewire` / `wireplumber` (already on Omarchy) — `pw-cat` does capture and playback
+* `socat` or `netcat` for the shell↔daemon socket (Omarchy ships `socat`)
+* `tailscale`, only if you want to use it over the internet
 * Go 1.22+ **only if you want to build the daemon locally** (recommended — see below)
 
 Install dependencies manually so you can audit what's installed:
 
 ```sh
 # Arch / Omarchy — audio + build tool
-pacman -S pipewire wireplumber opus go
-# or: yay -S pipewire wireplumber opus go
+pacman -S pipewire wireplumber socat go
+# over the internet, additionally:
+pacman -S tailscale
 ```
 
 > The plugin never runs `sudo` or installs packages itself. It only invokes `omacom-engine` if it is already present.
@@ -119,7 +122,42 @@ bind = SUPER_SHIFT, I, exec, omarchy-shell com.aktivesolutions.omacom toggleTalk
 
 ### Discovery
 
-Default UDP `53318` on broadcast `255.255.255.255` + `ff02::1` — works on LAN and on Tailscale's `100.x` without extra config. Change it in **Settings → Plugins → Omacom → Discovery / audio UDP port** if it collides. The daemon never binds `0.0.0.0` with a public relay; it only joins your local networks.
+Default UDP `53318`. A hello goes out every 2s to the LAN broadcast address and to every peer Omacom can address directly; peers expire after 10s of silence. Change the port in **Settings → Plugins → Omacom → Discovery / audio UDP port** if it collides.
+
+Broadcast finds peers on a LAN and nowhere else — it cannot cross a tunnel. `tailscale0` is a point-to-point interface with no broadcast flag, and `255.255.255.255` goes out your default route rather than the tunnel. Reaching a tailnet therefore means unicasting to each peer, which is what the next section is about.
+
+## Over the internet
+
+Omacom does not encrypt or authenticate its own packets. Running it across the internet means running it inside something that does, and the supported answer is **Tailscale** — it already provides exactly the three things this needs: WireGuard encryption end to end, cryptographic node identity, and NAT traversal with a relay fallback when hole punching fails.
+
+Install Tailscale on each machine, join them to the same tailnet, then:
+
+**Settings → Plugins → Omacom → Tailscale only.**
+
+With that on, Omacom:
+
+* asks the local `tailscale` for its online peers every 30s and sends hellos straight to their `100.x` addresses — no configuration, no peer list to maintain;
+* stops broadcasting on the LAN entirely;
+* **drops every packet from outside Tailscale's ranges** (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), so a machine on the café wifi cannot reach you at all.
+
+The panel's footer shows which mode is live — `LAN broadcast`, `LAN broadcast + N direct`, or `Tailscale only · N addresses`.
+
+**Extra peers** takes a comma-separated list of addresses to contact directly (`100.71.4.9`, `mac.tail1234.ts.net`, `10.0.0.5:53318`). Use it for a host Tailscale cannot see for you — a port-forwarded machine, or a WireGuard mesh that is not Tailscale. Bare addresses get the discovery port.
+
+Tailscale ACLs are worth setting: without them, everyone on your tailnet can hear you. Scope UDP `53318` to the devices that should be on the intercom.
+
+### What this does and does not protect
+
+| | |
+|---|---|
+| Someone on the path reading your audio | Protected by Tailscale (WireGuard) |
+| Someone on the path injecting audio | Protected by Tailscale |
+| A stranger on your LAN, with Tailscale only | Protected — non-tailnet sources are dropped |
+| A stranger on your LAN, without Tailscale only | **Not protected.** Two forged packets — a hello, then audio — reach your speakers |
+| Someone already on your tailnet | **Not protected.** Use ACLs |
+| Another member of the intercom spoofing a call-sign | **Not protected.** Call-signs are self-asserted |
+
+The last two are what per-channel keys and signed identities would fix, and Omacom does not have them yet. Until it does: on a network you do not control, turn Tailscale only on.
 
 ## What it installs and writes
 
@@ -129,6 +167,8 @@ Default UDP `53318` on broadcast `255.255.255.255` + `ff02::1` — works on LAN 
 | `$XDG_RUNTIME_DIR/omacom.sock` | Unix socket between service and daemon (`0600`) |
 | `~/.local/bin/omacom-engine` | Daemon binary (only after you run `bin/omacom-setup`) |
 | `~/.local/state/omacom/callsign` | This machine's call-sign, so it survives restarts (`0600`) |
+
+The daemon logs to the shell's own log — `journalctl --user -t omarchy-shell | grep omacom-engine` shows what it found, dropped, or re-rolled.
 
 Nothing else. No `~/.config/omarchy/shell.json` edits beyond the plugin entry, no `sudo`, no background service unit. Audio never leaves your LAN/Tailscale.
 
@@ -145,28 +185,49 @@ rm -rf ~/.local/state/omacom
 
 ## Security notes
 
-* Audio is captured from PipeWire while PTT is held and sent as Opus UDP to discovered peers on `53318`. Peers are discovered via UDP broadcast — anyone on your LAN/Tailscale can announce themselves. Call-signs ride the same cleartext discovery packets, so pick one you're comfortable sharing on that network. Don't use it on untrusted networks without Tailscale/WireGuard.
-* The daemon is a normal user process, not privileged. It never runs `sudo`.
-* This is an MVP — no end-to-end encryption yet. Use Tailscale if you need it over the internet.
+* Audio is captured from PipeWire while PTT is held and sent as raw PCM UDP to discovered peers on `53318`, in the clear. Call-signs ride the same cleartext hellos — pick one you are comfortable putting on that network.
+* Anyone who can send you a packet can announce themselves as a peer. Omacom will not play audio from an address that has not joined the roster first, and every source is rate-limited (120 packets/sec) with the roster capped at 64 — but that is abuse resistance, not authentication. **Turn on Tailscale only for anything beyond a network you control.**
+* The daemon is a normal user process, not privileged. It never runs `sudo`, installs nothing, and downloads nothing. The only file it writes is your call-sign.
+* No application-layer encryption yet. Per-channel keys and signed identities are the intended next step; today the tunnel is the security boundary.
 * Like all Omarchy plugins, this runs unsandboxed with your user permissions. Review `Service.qml`, `BarWidget.qml`, and `cmd/omacom-engine/` before trusting it.
 
 ## Development
 
 ```sh
-omarchy plugin validate . # check manifest
-qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Service.qml
-omarchy-shell shell call com.aktivesolutions.omacom state
+omarchy plugin validate .                     # check manifest
+(cd cmd/omacom-engine && go test ./... && go vet ./...)
+omarchy-shell com.aktivesolutions.omacom state
+journalctl --user -t omarchy-shell -f | grep omacom-engine   # daemon log
+```
+
+`qmllint` needs the shell's modules under a directory named `qs`, since they declare `module qs.Commons` / `qs.Ui`:
+
+```sh
+mkdir -p /tmp/omacom-imports && ln -sfn "$OMARCHY_PATH/shell" /tmp/omacom-imports/qs
+qmllint -I /tmp/omacom-imports BarWidget.qml Service.qml
+```
+
+Two daemons on one machine make a usable test net — they find each other through `--peers` exactly as tailnet peers do:
+
+```sh
+omacom-engine --socket /tmp/a.sock --port 53401 --peers 127.0.0.1:53402 &
+omacom-engine --socket /tmp/b.sock --port 53402 --peers 127.0.0.1:53401 &
+printf '{"op":"getPeers"}\n' | socat -t1 - UNIX-CONNECT:/tmp/a.sock
 ```
 
 Structure:
 
 ```
-manifest.json          # id: com.aktivesolutions.omacom, 0.1.5, bar-widget + service
+manifest.json          # id: com.aktivesolutions.omacom, 0.2.0, bar-widget + service
 BarWidget.qml          # bar icon, call-sign / ×N talker label, peer count, panel
 Service.qml            # daemon lifecycle, unix-socket IPC, peer polling
-cmd/omacom-engine/     # Go daemon — UDP discovery + audio + call-sign announcements (build from checkout)
-  main.go              #   discovery, PTT, audio, unix-socket ops
+cmd/omacom-engine/     # Go daemon — build from the checkout, no deps beyond stdlib
+  main.go              #   discovery, PTT, unix-socket ops
   callsign.go          #   random-word assignment, persistence, clash re-roll
+  audio.go             #   capture and per-talker playback sinks
+  discovery.go         #   broadcast targets, tailnet peers, address classification
+  limits.go            #   per-source rate limiting and roster caps
+  *_test.go            #   go test ./cmd/omacom-engine/...
 bin/omacom-setup       # build script — go build from source, no download by default
 ```
 

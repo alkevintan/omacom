@@ -33,6 +33,11 @@ Panel {
   readonly property bool anyoneTalking: svc ? !!svc.anyoneTalking : false
   readonly property string talkDisplay: svc ? String(svc.talkDisplay || "") : ""
   readonly property string callSign: svc ? String(svc.callSign || "") : ""
+  // How the daemon is reaching peers — LAN broadcast, direct addresses, or
+  // Tailscale only. Worth showing: it is the difference between "anyone on
+  // this wifi" and "only my tailnet".
+  readonly property string transportText: svc ? String(svc.transportText || "") : ""
+  readonly property bool tailnetOnly: svc ? !!svc.daemonTailnetOnly : false
 
   // The shell injects settings into widgets but not into services, so the
   // widget is the only place that sees them — hand them over so the service
@@ -335,6 +340,32 @@ Panel {
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
           font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
+        }
+
+        // ---------- Transport: where this station is reachable ------------
+        Row {
+          visible: root.transportText !== ""
+          width: parent.width
+          spacing: Style.space(6)
+
+          // md-lan-connect when broadcasting on the LAN, md-shield-lock when
+          // the daemon is refusing everything outside Tailscale.
+          Text {
+            text: root.tailnetOnly ? "󰦝" : "󰲝"
+            color: root.tailnetOnly ? Color.accent : Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.5)
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            text: root.transportText
+            color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.5)
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+            anchors.verticalCenter: parent.verticalCenter
+          }
         }
       }
     }

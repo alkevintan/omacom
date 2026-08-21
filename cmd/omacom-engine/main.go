@@ -2,11 +2,11 @@ package main
 
 // omacom-engine — PTT intercom daemon for Omacom.
 //
-// Audio path: PipeWire capture (pw-cat --record) → UDP broadcast on :53318
-// to discovered peers, and reverse: UDP → pw-cat --playback. Opus is handled
-// by PipeWire's native Opus if available; we send raw s16le@48k mono as UDP
-// payload for MVP simplicity (no extra Go deps) and let PipeWire resample.
-// A real Opus build would use gopkg.in/hraban/opus.v2 — left as follow-up.
+// Audio path: PipeWire capture → UDP to discovered peers, and reverse. Raw
+// s16le@48k mono, one 20ms frame per packet, no extra Go deps. Format and
+// per-talker playback sinks live in audio.go. Compression is a follow-up:
+// an Opus build would use gopkg.in/hraban/opus.v2 and cut the bitrate by
+// roughly 20x, at the cost of the first non-stdlib dependency.
 //
 // IPC: unix socket at $XDG_RUNTIME_DIR/omacom.sock — QML Service writes
 // {"op":"startTalking"} / {"op":"stopTalking"} / {"op":"getPeers"} as newline
@@ -24,20 +24,27 @@ package main
 // for talkHold after its last claim. Bare legacy hellos are still accepted
 // (peer shown by IP); audio packet format is unchanged.
 //
-// Discovery: UDP broadcast every 2s to 255.255.255.255:port and to each
-// interface's broadcast addr. Peers expire after 10s. No global relay, only
-// LAN/Tailscale. All UDP payloads are bounded (max 2048) and carry deadlines.
+// Discovery: a hello every 2s — LAN broadcast, and unicast to tailnet peers
+// and any --peers addresses (see discovery.go). Peers expire after 10s. No
+// global relay. All UDP payloads are bounded (max 2048) and carry deadlines.
+//
+// Inbound is untrusted: every packet passes a per-source token bucket, the
+// roster is capped, and audio is only played from an address that has already
+// joined the roster. --tailnet-only additionally drops anything from outside
+// Tailscale's address ranges and stops broadcasting on the LAN.
 
 import (
 	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,9 +68,14 @@ type peer struct {
 }
 
 type daemon struct {
-	socketPath string
-	udpPort    int
-	callSign   string
+	socketPath  string
+	udpPort     int
+	callSign    string
+	tailnetOnly bool
+
+	sinks   *playback
+	limiter *limiter
+	targets *targets
 
 	mu           sync.Mutex
 	callSignAuto bool             // rolled by us, so a clash may be re-rolled
@@ -94,7 +106,9 @@ func main() {
 	var (
 		socket   = flag.String("socket", "", "unix socket path (default $XDG_RUNTIME_DIR/omacom.sock)")
 		port     = flag.Int("port", 53318, "discovery/audio UDP port")
-		callsign = flag.String("callsign", "", "call-sign announced to peers (default hostname)")
+		callsign = flag.String("callsign", "", "call-sign announced to peers (default: a random word)")
+		peers    = flag.String("peers", "", "comma-separated peer addresses to reach directly (tailnet IPs, port-forwarded hosts)")
+		tsOnly   = flag.Bool("tailnet-only", false, "only talk to Tailscale addresses; skip LAN broadcast")
 	)
 	flag.Parse()
 	if *socket == "" {
@@ -122,6 +136,10 @@ func main() {
 		udpPort:      *port,
 		callSign:     cs,
 		callSignAuto: auto,
+		tailnetOnly:  *tsOnly,
+		sinks:        newPlayback(),
+		limiter:      newLimiter(),
+		targets:      newTargets(*peers),
 		peers:        make(map[string]*peer),
 		available:    true,
 	}
@@ -153,9 +171,13 @@ func (d *daemon) run() error {
 	defer func() { ul.Close(); os.Remove(d.socketPath) }()
 	_ = os.Chmod(d.socketPath, 0600)
 
+	if d.tailnetOnly {
+		log.Printf("tailnet-only: LAN broadcast off, non-Tailscale sources dropped")
+	}
 	go d.broadcastLoop()
 	go d.udpReadLoop()
 	go d.reapLoop()
+	go d.tailnetLoop()
 	go d.serveUnix(ul)
 
 	select {}
@@ -176,28 +198,13 @@ func (d *daemon) broadcastHello() error {
 	if !available {
 		return nil
 	}
-	// Send to global broadcast + per-interface broadcasts.
-	addrs := []string{"255.255.255.255"}
-	if ifs, err := net.Interfaces(); err == nil {
-		for _, iface := range ifs {
-			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagBroadcast == 0 {
-				continue
-			}
-			if addrsIface, err := iface.Addrs(); err == nil {
-				for _, a := range addrsIface {
-					if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP.To4() != nil {
-						ip := ipnet.IP.To4()
-						mask := net.IP(ipnet.Mask).To4()
-						bcast := make(net.IP, 4)
-						for i := 0; i < 4; i++ {
-							bcast[i] = ip[i] | ^mask[i]
-						}
-						addrs = append(addrs, bcast.String())
-					}
-				}
-			}
-		}
+	// LAN broadcast, plus a unicast to every tailnet and static peer —
+	// broadcast does not cross a tunnel, so those need addressing directly.
+	var addrs []string
+	if !d.tailnetOnly {
+		addrs = broadcastAddrs()
 	}
+	addrs = append(addrs, d.targets.unicast()...)
 	// Hello carries call-sign and current talking state so peers can show
 	// who is on air even if an on-air edge packet was lost (UDP).
 	talkByte := byte('0')
@@ -209,16 +216,39 @@ func (d *daemon) broadcastHello() error {
 	d.mu.Unlock()
 	msg := append([]byte(helloMagic+"|"), []byte(cs+"|")...)
 	msg = append(msg, talkByte)
+	d.sendTo(addrs, msg)
+	return nil
+}
+
+// sendTo writes one payload to each address, best-effort with a deadline —
+// an unreachable peer must not stall the ones behind it.
+func (d *daemon) sendTo(addrs []string, msg []byte) {
+	port := strconv.Itoa(d.udpPort)
 	for _, a := range addrs {
-		raddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", a, d.udpPort))
+		target := a
+		// A bare address gets the discovery port; "host:1234" and
+		// "[v6]:1234" are left as the user wrote them.
+		if _, _, err := net.SplitHostPort(target); err != nil {
+			target = net.JoinHostPort(a, port)
+		}
+		raddr, err := net.ResolveUDPAddr("udp", target)
 		if err != nil {
 			continue
 		}
-		// Best-effort, deadline per send.
 		d.udpConn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
 		_, _ = d.udpConn.WriteToUDP(msg, raddr)
 	}
-	return nil
+}
+
+// tailnetLoop keeps the tailnet peer list fresh. Nodes come and go, and a
+// peer that just came online should be reachable within a poll.
+func (d *daemon) tailnetLoop() {
+	d.targets.refreshTailnet()
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		d.targets.refreshTailnet()
+	}
 }
 
 func (d *daemon) udpReadLoop() {
@@ -240,14 +270,22 @@ func (d *daemon) udpReadLoop() {
 }
 
 func (d *daemon) handleUDP(payload []byte, raddr *net.UDPAddr) {
-	s := string(payload)
+	// Everything below this point costs work, so the cheap rejections come
+	// first: wrong network, then too fast, then switched off.
+	if d.tailnetOnly && !isTailnetAddr(raddr.IP) {
+		return
+	}
+	ip := raddr.IP.String()
+	if !d.limiter.allow(ip) {
+		return
+	}
 	d.mu.Lock()
 	available := d.available
 	d.mu.Unlock()
 	if !available {
 		return
 	}
-	ip := raddr.IP.String()
+	s := string(payload)
 	now := time.Now()
 	switch {
 	case s == helloMagic:
@@ -255,7 +293,7 @@ func (d *daemon) handleUDP(payload []byte, raddr *net.UDPAddr) {
 		d.mu.Lock()
 		if p, ok := d.peers[ip]; ok {
 			p.LastSeen = now
-		} else {
+		} else if len(d.peers) < maxPeers {
 			d.peers[ip] = &peer{IP: ip, LastSeen: now}
 		}
 		d.mu.Unlock()
@@ -267,6 +305,10 @@ func (d *daemon) handleUDP(payload []byte, raddr *net.UDPAddr) {
 		d.mu.Lock()
 		p, ok := d.peers[ip]
 		if !ok {
+			if len(d.peers) >= maxPeers {
+				d.mu.Unlock()
+				return
+			}
 			p = &peer{IP: ip}
 			d.peers[ip] = p
 		}
@@ -276,12 +318,16 @@ func (d *daemon) handleUDP(payload []byte, raddr *net.UDPAddr) {
 			p.LastTalk = now
 		}
 		d.mu.Unlock()
-		d.resolveCallSignClash(cs)
+		d.resolveCallSignClash(cs, raddr.IP)
 	case strings.HasPrefix(s, onAirMagic):
 		cs := sanitizeCallSign(s[len(onAirMagic):])
 		d.mu.Lock()
 		p, ok := d.peers[ip]
 		if !ok {
+			if len(d.peers) >= maxPeers {
+				d.mu.Unlock()
+				return
+			}
 			p = &peer{IP: ip}
 			d.peers[ip] = p
 		}
@@ -300,76 +346,55 @@ func (d *daemon) handleUDP(payload []byte, raddr *net.UDPAddr) {
 		}
 		d.mu.Unlock()
 	default:
-		if strings.HasPrefix(s, audioMagic) {
-			// Audio packet — play it if not talking (avoid echo) and if available.
-			d.mu.Lock()
-			talking := d.talking
-			d.mu.Unlock()
-			if talking {
-				return
-			}
-			raw := payload[len(audioMagic):]
-			if len(raw) == 0 || len(raw) > 1800 {
-				return
-			}
-			go d.playAudio(raw)
+		if !strings.HasPrefix(s, audioMagic) {
+			return
 		}
-	}
-}
-
-func (d *daemon) playAudio(raw []byte) {
-	// Try pw-cat first (PipeWire native), fallback to paplay, then aplay.
-	var cmd *exec.Cmd
-	if _, err := exec.LookPath("pw-cat"); err == nil {
-		cmd = exec.Command("pw-cat", "--playback", "-")
-	} else if _, err := exec.LookPath("paplay"); err == nil {
-		cmd = exec.Command("paplay", "--raw", "--channels=1", "--rate=48000", "--format=s16le")
-	} else if _, err := exec.LookPath("aplay"); err == nil {
-		cmd = exec.Command("aplay", "-f", "S16_LE", "-r", "48000", "-c", "1")
-	} else {
-		log.Printf("no audio playback tool (pw-cat/paplay/aplay) — dropping %d bytes", len(raw))
-		return
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		log.Printf("playback stdin: %v", err)
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		log.Printf("playback start %v: %v", cmd.Path, err)
-		return
-	}
-	// Bounded write with deadline — don't block forever on audio sink.
-	done := make(chan error, 1)
-	go func() {
-		_, err := stdin.Write(raw)
-		stdin.Close()
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			log.Printf("playback write: %v", err)
+		frame := payload[len(audioMagic):]
+		if len(frame) == 0 || len(frame) > frameBytes {
+			return
 		}
-	case <-time.After(2 * time.Second):
-		log.Printf("playback write timeout")
-		_ = cmd.Process.Kill()
+		d.mu.Lock()
+		talking := d.talking
+		p, joined := d.peers[ip]
+		if joined {
+			// Audio is itself an on-air claim, which keeps the roster
+			// honest when an edge packet is lost.
+			p.LastTalk = now
+			p.LastSeen = now
+		}
+		d.mu.Unlock()
+		// An address that has not said hello does not get to use the
+		// speakers. Without this, one forged packet is enough.
+		if !joined || talking {
+			return
+		}
+		d.sinks.push(ip, frame)
 	}
-	_ = cmd.Wait()
 }
 
 func (d *daemon) reapLoop() {
-	t := time.NewTicker(5 * time.Second)
-	defer t.Stop()
-	for range t.C {
-		cutoff := time.Now().Add(-10 * time.Second)
-		d.mu.Lock()
-		for ip, p := range d.peers {
-			if p.LastSeen.Before(cutoff) {
-				delete(d.peers, ip)
+	// Sinks are reaped on a shorter beat than peers: a released PTT should
+	// free the audio device promptly, while a peer is allowed to miss a
+	// couple of hellos before dropping off the roster.
+	sinkTick := time.NewTicker(500 * time.Millisecond)
+	defer sinkTick.Stop()
+	peerTick := time.NewTicker(5 * time.Second)
+	defer peerTick.Stop()
+	for {
+		select {
+		case <-sinkTick.C:
+			d.sinks.reap()
+		case <-peerTick.C:
+			cutoff := time.Now().Add(-10 * time.Second)
+			d.mu.Lock()
+			for ip, p := range d.peers {
+				if p.LastSeen.Before(cutoff) {
+					delete(d.peers, ip)
+				}
 			}
+			d.mu.Unlock()
+			d.limiter.reap()
 		}
-		d.mu.Unlock()
 	}
 }
 
@@ -444,6 +469,7 @@ func (d *daemon) handleConn(c net.Conn) {
 					_ = cmd.Process.Kill()
 					_ = cmd.Wait()
 				}
+				d.sinks.stopAll()
 				if wasTalking {
 					go d.announceTalk(false)
 				}
@@ -513,8 +539,13 @@ func (d *daemon) setCallSign(want string) {
 // resolveCallSignClash re-rolls when another station is already using our
 // auto-assigned word. Only auto call-signs move — a name the user chose is
 // theirs to keep, clash or not.
-func (d *daemon) resolveCallSignClash(theirs string) {
-	if theirs == "" {
+//
+// A hello from one of our own addresses is never a clash. Restarts overlap:
+// a daemon that is shutting down can still be broadcasting the name the
+// daemon replacing it just loaded from disk, and re-rolling on that would
+// rename the station every time the plugin reloads.
+func (d *daemon) resolveCallSignClash(theirs string, src net.IP) {
+	if theirs == "" || isLocalAddr(src) {
 		return
 	}
 	d.mu.Lock()
@@ -567,26 +598,22 @@ func (d *daemon) replyPeers(c net.Conn) {
 	available := d.available
 	callSign := d.callSign
 	d.mu.Unlock()
+	tailnet := d.targets.unicast()
 	d.reply(c, map[string]any{
-		"peers":     peers,
-		"talkers":   talkers,
-		"talking":   talking,
-		"available": available,
-		"callSign":  callSign,
+		"peers":        peers,
+		"talkers":      talkers,
+		"talking":      talking,
+		"available":    available,
+		"callSign":     callSign,
+		"tailnetOnly":  d.tailnetOnly,
+		"directTarget": len(tailnet),
 	})
 }
 
 func (d *daemon) startCapture() {
 	// Capture mono s16le 48k from PipeWire and stream as UDP audio packets.
-	var cmd *exec.Cmd
-	if _, err := exec.LookPath("pw-cat"); err == nil {
-		// pw-cat --record -  emits raw s16le. Use --rate 48000 --channels 1 if supported.
-		cmd = exec.Command("pw-cat", "--record", "-", "--rate", "48000", "--channels", "1")
-	} else if _, err := exec.LookPath("parec"); err == nil {
-		cmd = exec.Command("parec", "--raw", "--channels=1", "--rate=48000", "--format=s16le")
-	} else if _, err := exec.LookPath("arecord"); err == nil {
-		cmd = exec.Command("arecord", "-f", "S16_LE", "-r", "48000", "-c", "1", "-t", "raw")
-	} else {
+	cmd := captureCommand()
+	if cmd == nil {
 		log.Printf("no capture tool (pw-cat/parec/arecord) — PTT no-op")
 		d.mu.Lock()
 		d.talking = false
@@ -613,7 +640,10 @@ func (d *daemon) startCapture() {
 		d.talking = false
 		d.mu.Unlock()
 	}()
-	buf := make([]byte, 960*2) // 20ms of s16le mono @48k = 960 samples *2 = 1920
+	// One whole 20ms frame per packet. A partial read would put a fragment
+	// on the wire that the receiver has no way to reassemble, so read until
+	// the frame is full; stopTalking kills the process, which unblocks this.
+	buf := make([]byte, frameBytes)
 	for {
 		d.mu.Lock()
 		talking := d.talking
@@ -621,17 +651,15 @@ func (d *daemon) startCapture() {
 		if !talking {
 			return
 		}
-		// Bounded read with timeout — don't block forever on mic.
-		_ = cmd.Process // keep liveness
-		n, err := stdout.Read(buf)
-		if err != nil || n == 0 {
-			log.Printf("capture read: %v", err)
+		if _, err := io.ReadFull(stdout, buf); err != nil {
+			if err != io.EOF && err != io.ErrUnexpectedEOF {
+				log.Printf("capture read: %v", err)
+			}
 			return
 		}
-		if n > 1800 {
-			n = 1800
-		}
-		payload := append([]byte(audioMagic), buf[:n]...)
+		payload := make([]byte, 0, len(audioMagic)+frameBytes)
+		payload = append(payload, audioMagic...)
+		payload = append(payload, buf...)
 		d.sendToPeers(payload)
 	}
 }
