@@ -11,7 +11,7 @@ BIN_OUT="$HOME/.local/bin/omacom-engine"
 if command -v go >/dev/null 2>&1; then
   echo "Building omacom-engine from $REPO_ROOT/cmd/omacom-engine ..."
   mkdir -p "$(dirname "$BIN_OUT")"
-  (cd "$REPO_ROOT" && go build -o "$BIN_OUT" ./cmd/omacom-engine)
+  (cd "$REPO_ROOT/cmd/omacom-engine" && go build -o "$BIN_OUT" .)
   echo "Built $BIN_OUT — run with: $BIN_OUT --port 53318"
   exit 0
 fi
