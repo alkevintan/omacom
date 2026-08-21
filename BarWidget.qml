@@ -6,9 +6,12 @@ import qs.Ui
 
 // Omacom — bar widget companion to the service daemon.
 //
-// Hold to talk: press and hold the button (or configured PTT key) while the
-// service streams Opus over LAN / Tailscale. This file holds no secrets — it
-// only reflects daemon state and forwards press/release.
+// Status-only indicator: shows peer count / talking / availability state.
+// All interaction lives on keybinds (hold SUPER+I to talk — see README) and
+// the shell IPC. Omarchy's bar forwards every non-drag release as a click,
+// so mouse actions on bar icons can't distinguish click from hold — the
+// widget opts out of click handling entirely (pressable: false). This file
+// holds no secrets — it only reflects daemon state.
 
 BarWidget {
   id: root
@@ -32,47 +35,21 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // nf-md-bullhorn (0xF0E6F) — intercom/broadcast, slash when unavailable (like turning off intercom)
-    text: !root.available ? "󰸣" : (root.talking ? "󰸞" : "󰸢")
+    // md-account_voice_outline (0xF1309) — idle; solid md-account_voice
+    // (0xF05CB) while transmitting; md-account_tie_voice_off_outline
+    // (0xF130B) when unavailable
+    text: !root.available ? "󱌋" : (root.talking ? "󰗋" : "󱌉")
     tooltipText: !root.available
-      ? "Omacom — unavailable (intercom off) — right-click to go available"
+      ? "Omacom — unavailable (intercom off) — SUPER+ALT+I to go available"
       : root.daemonUp
-        ? (root.talking ? "Omacom — talking (release to stop)" : "Omacom — " + root.peerCount + " peer(s) on :" + root.discoveryPort + " — hold to talk · right-click to go unavailable")
-        : "Omacom — daemon not running (click to start)"
+        ? (root.talking ? "Omacom — talking (release SUPER+I to stop)" : "Omacom — " + root.peerCount + " peer(s) on :" + root.discoveryPort + " — hold SUPER+I to talk · SUPER+ALT+I to go unavailable")
+        : "Omacom — daemon not running"
     slotSize: Style.bar.statusSlot
     opacity: !root.available ? 0.45 : 1.0
+    pressable: false
     // Visual feedback while transmitting — uses bar accent, not menu tokens
     // so it stays visible on every theme (like 1Passchy's selectedFill).
     property color baseFg: root.bar ? root.bar.foreground : Color.foreground
     property color activeBg: root.talking ? Style.selectedFillFor(baseFg, Color.accent) : "transparent"
-
-    onPressed: function(buttonCode) {
-      if (!root.bar || !root.bar.shell) return
-      if (buttonCode === Qt.LeftButton) {
-        if (!root.available) return // unavailable = PTT disabled
-        if (svc && typeof svc.startTalking === "function") svc.startTalking()
-      } else if (buttonCode === Qt.RightButton) {
-        if (svc && typeof svc.toggleAvailable === "function") svc.toggleAvailable()
-        else if (svc && typeof svc.togglePanel === "function") svc.togglePanel()
-      } else if (buttonCode === Qt.MiddleButton) {
-        if (svc && typeof svc.toggleAvailable === "function") svc.toggleAvailable()
-      }
-    }
-    onReleased: function(buttonCode) {
-      if (buttonCode === Qt.LeftButton && root.available && svc && typeof svc.stopTalking === "function") svc.stopTalking()
-    }
-  }
-
-  // Keyboard PTT — when the bar has focus, Space/M as configured. The service
-  // owns the real audio; this just mirrors the key so a keyboard-only demo works.
-  Item {
-    id: pttKey
-    focus: true
-    Keys.onPressed: function(event) {
-      if (event.key === Qt.Key_Space && svc && typeof svc.startTalking === "function") { svc.startTalking(); event.accepted = true }
-    }
-    Keys.onReleased: function(event) {
-      if (event.key === Qt.Key_Space && svc && typeof svc.stopTalking === "function") { svc.stopTalking(); event.accepted = true }
-    }
   }
 }
