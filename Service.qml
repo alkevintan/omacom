@@ -114,12 +114,15 @@ Item {
   property double _lastOpSent: 0
   property double _pollStarted: 0
 
+  // No /tmp fallback anywhere below. A socket in a world-writable directory
+  // is one another local user can plant first and then read every op we send;
+  // a binary path there is one they can plant and have us execute. Without a
+  // private runtime directory and a home, Omacom declines to run.
   readonly property string socketPath: {
     var s = String(root.setting("daemonSocket", "")).trim()
     if (s) return s
     var rt = Quickshell.env("XDG_RUNTIME_DIR")
-    if (rt) return rt + "/omacom.sock"
-    return "/tmp/omacom.sock"
+    return rt ? rt + "/omacom.sock" : ""
   }
   readonly property int discoveryPort: Number(root.setting("discoveryPort", 53318))
   readonly property bool autoStart: root.setting("autoStartDaemon", true) === true
@@ -146,14 +149,18 @@ Item {
         : "LAN broadcast"
   readonly property string engineBin: {
     var h = Quickshell.env("HOME")
-    if (h) return h + "/.local/bin/omacom-engine"
-    return "/tmp/omacom-engine"
+    return h ? h + "/.local/bin/omacom-engine" : ""
   }
 
   // -- daemon lifecycle ----------------------------------------------------
 
   function ensureDaemon() {
     if (!root.autoStart) return
+    if (!root.engineBin || !root.socketPath) {
+      root.daemonUp = false
+      root.lastError = "no HOME or XDG_RUNTIME_DIR — refusing to fall back to /tmp"
+      return
+    }
     // Check if binary exists — if not, show helpful state; bin/omacom-setup builds it.
     // We probe via `test -x` then start daemonProc if present.
     probeProc.running = true

@@ -112,11 +112,15 @@ func main() {
 	)
 	flag.Parse()
 	if *socket == "" {
-		if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" {
-			*socket = filepath.Join(rt, "omacom.sock")
-		} else {
-			*socket = "/tmp/omacom.sock"
+		// Deliberately no /tmp fallback: a control socket in a shared
+		// world-writable directory can be squatted by another local user,
+		// who then receives every op the shell sends. Without a private
+		// runtime directory the caller must name the path themselves.
+		rt := os.Getenv("XDG_RUNTIME_DIR")
+		if rt == "" {
+			log.Fatalf("omacom-engine: XDG_RUNTIME_DIR is unset — pass --socket with a path only you can write")
 		}
+		*socket = filepath.Join(rt, "omacom.sock")
 	}
 	// Explicit flag wins; then whatever this machine was called last time;
 	// otherwise roll a word and remember it.
