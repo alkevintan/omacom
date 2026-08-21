@@ -16,9 +16,28 @@ import qs.Commons
 // so the running binary is auditable from the reviewed commit. Without Go it
 // stops and explains.
 
-Service {
+Item {
   id: root
-  moduleName: "com.aktivesolutions.omacom"
+
+  // Injected by the shell's service host (shell.qml ensureService)
+  property var shell: null
+  property var manifest: null
+  property var pluginRegistry: null
+  property var barWidgetRegistry: null
+  property string omarchyPath: ""
+
+  // Plugin settings — manifest defaults, overridable via shell.json entry
+  property var settings: ({})
+
+  function setting(name, fallback) {
+    var value = settings ? settings[name] : undefined
+    if (value === undefined || value === null) {
+      var defs = manifest && manifest.barWidget && manifest.barWidget.defaults
+        ? manifest.barWidget.defaults : {}
+      value = defs[name]
+    }
+    return value === undefined || value === null ? fallback : value
+  }
 
   property bool daemonUp: false
   property int peerCount: 0
@@ -26,6 +45,12 @@ Service {
   property bool available: true
   property string lastError: ""
   property var peers: []
+
+  // Op/poll ordering: timestamps let a poll response that was already in
+  // flight before an op was sent get discarded instead of reverting the
+  // optimistic state flip (e.g. toggleAvailable snapping back).
+  property double _lastOpSent: 0
+  property double _pollStarted: 0
 
   readonly property string socketPath: {
     var s = String(root.setting("daemonSocket", "")).trim()
@@ -70,11 +95,13 @@ Service {
 
   function sendOp(op) {
     if (!root.daemonUp) { root.ensureDaemon(); return }
-    // Support op with payload like setAvailable:true
+    // Support op with payload like setAvailable:true — value must be a JSON
+    // string; the daemon coerces with strings.ToLower(req["value"])
     var json = op.indexOf(":") !== -1
-      ? "{\"op\":\"" + op.split(":")[0] + "\",\"value\":" + op.split(":")[1] + "}"
+      ? "{\"op\":\"" + op.split(":")[0] + "\",\"value\":\"" + op.split(":")[1] + "\"}"
       : "{\"op\":\"" + op + "\"}"
     socketProc.op = op
+    root._lastOpSent = Date.now()
     socketProc.command = ["sh", "-c", "printf '" + json + "\\n' | socat -t1 - UNIX-CONNECT:" + root.socketPath + " 2>/dev/null || printf '" + json + "\\n' | nc -U " + root.socketPath + " 2>/dev/null || true"]
     socketProc.running = true
   }
@@ -100,8 +127,8 @@ Service {
     root.available = !root.available
     if (!root.available) root.talking = false
     root.sendOp(root.available ? "setAvailable:true" : "setAvailable:false")
-    // Refresh peers immediately so bar tooltip updates
-    Qt.callLater(function() { root.refreshPeers() })
+    // socketProc.onExited triggers refreshPeers once the op has landed —
+    // polling earlier would read the old state and revert the toggle.
   }
 
   function togglePanel() {
@@ -112,6 +139,8 @@ Service {
 
   function refreshPeers() {
     if (!root.daemonUp) return
+    if (socketProc.running) return // an op is in flight — poll after it lands
+    root._pollStarted = Date.now()
     pollProc.command = ["sh", "-c", "printf '{\"op\":\"getPeers\"}\\n' | socat -t1 - UNIX-CONNECT:" + root.socketPath + " 2>/dev/null | head -c 4096"]
     pollProc.running = true
   }
@@ -197,6 +226,8 @@ Service {
       if (socketOut.text) {
         try { var j = JSON.parse(String(socketOut.text)); if (j.talking !== undefined) root.talking = !!j.talking } catch(e) {}
       }
+      // The op has landed — refresh so the UI reflects the daemon's state
+      root.refreshPeers()
     }
   }
 
@@ -204,6 +235,9 @@ Service {
     id: pollProc
     stdout: StdioCollector { id: pollOut; waitForEnd: true }
     onExited: function(exitCode) {
+      // Discard responses that were already in flight before the latest op —
+      // they carry pre-op state and would revert e.g. toggleAvailable.
+      if (root._lastOpSent > root._pollStarted) return
       var txt = String(pollOut.text || "").trim()
       if (!txt) return
       try {
