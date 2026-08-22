@@ -4,6 +4,12 @@ Push-to-talk intercom for Omarchy Quattro. A bar widget + local daemon that stre
 
 Like all Omarchy plugins, it runs unsandboxed — review the source before trusting it.
 
+![The Omacom panel: call-sign editor and the roster of joined stations](docs/panel.png)
+
+The bar icon carries the state, and shows the call-sign of whoever is talking:
+
+![Bar widget in three states: idle, a peer on air, and intercom off](docs/bar-states.png)
+
 ## What it is
 
 * **Bar widget** — status: peer count on `:53318`, talking, availability, plus the on-air call-sign (a `×N` counter when several talk at once). Clicking opens the panel (roster + call-sign editor); push-to-talk itself is keybind-only, because Omarchy's bar can't distinguish a click from a hold.
@@ -142,6 +148,8 @@ With that on, Omacom:
 
 The panel's footer shows which mode is live — `LAN broadcast`, `LAN broadcast + N direct`, or `Tailscale only · N addresses`.
 
+![Panel running in Tailscale-only mode](docs/tailnet.png)
+
 **Extra peers** takes a comma-separated list of addresses to contact directly (`100.71.4.9`, `mac.tail1234.ts.net`, `10.0.0.5:53318`). Use it for a host Tailscale cannot see for you — a port-forwarded machine, or a WireGuard mesh that is not Tailscale. Bare addresses get the discovery port.
 
 Tailscale ACLs are worth setting: without them, everyone on your tailnet can hear you. Scope UDP `53318` to the devices that should be on the intercom.
@@ -219,6 +227,8 @@ Structure:
 
 ```
 manifest.json          # id: com.aktivesolutions.omacom, 0.2.0, bar-widget + service
+preview.png            # marketplace card image
+docs/                  # README screenshots
 BarWidget.qml          # bar icon, call-sign / ×N talker label, peer count, panel
 Service.qml            # daemon lifecycle, unix-socket IPC, peer polling
 cmd/omacom-engine/     # Go daemon — build from the checkout, no deps beyond stdlib
