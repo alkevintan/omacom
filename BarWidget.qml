@@ -76,10 +76,13 @@ Panel {
     root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
 
-  // md-account_voice_outline (0xF1309) — idle; solid md-account_voice
-  // (0xF05CB) while anyone transmits; md-account_tie_voice_off_outline
-  // (0xF130B) when unavailable
-  readonly property string icon: !root.available ? "󱌋" : (root.anyoneTalking ? "󰗋" : "󱌉")
+  // One glyph family, state carried by fill and slash — the convention every
+  // first-party bar icon follows (bluetooth is 󰂯 / 󰂱 / 󰂲). All three are
+  // md-account-tie-voice: outline (0xF1309) idle, solid (0xF1308) while
+  // anyone transmits, off-outline (0xF130B) when unavailable. Mixing in
+  // md-account-voice (0xF05CB) for the talking state changed the silhouette
+  // mid-transmission — that family has no outline or off variant to match.
+  readonly property string icon: !root.available ? "󱌋" : (root.anyoneTalking ? "󱌈" : "󱌉")
   readonly property string statusText: !root.available
     ? "Turned Off"
     : !root.daemonUp ? "Daemon Not Running"
@@ -399,7 +402,7 @@ Panel {
         id: rowGlyph
         anchors.left: parent.left
         anchors.verticalCenter: parent.verticalCenter
-        text: row.onAir ? "󰗋" : "󱌉"
+        text: row.onAir ? "󱌈" : "󱌉"
         color: row.onAir ? Color.accent : Qt.darker(row.foreground, 1.4)
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.heading
