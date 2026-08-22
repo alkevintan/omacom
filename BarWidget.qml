@@ -125,6 +125,7 @@ Panel {
 
     // Who is on air — their call-sign, or ×N when several talk at once.
     Text {
+      textFormat: Text.PlainText
       visible: root.anyoneTalking && !root.vertical
       text: root.talkDisplay
       color: root.talking ? Color.accent : (root.bar ? root.bar.foreground : Color.bar.text)
@@ -172,6 +173,7 @@ Panel {
           implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, availSwitch.implicitHeight)
 
           Text {
+            textFormat: Text.PlainText
             id: heroIcon
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
@@ -209,6 +211,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               text: "Omacom"
               color: root.bar ? root.bar.foreground : Color.foreground
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -219,6 +222,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               text: root.statusText.toUpperCase()
               color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.4)
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -296,6 +300,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: "Enter to rename · " + (root.daemonUp ? "peers see this name" : "daemon not running")
             color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.5)
@@ -334,6 +339,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.roster.length <= 1
           width: parent.width
           text: !root.daemonUp ? "Daemon not running"
@@ -354,6 +360,7 @@ Panel {
           // md-lan-connect when broadcasting on the LAN, md-shield-lock when
           // the daemon is refusing everything outside Tailscale.
           Text {
+            textFormat: Text.PlainText
             text: root.tailnetOnly ? "󰦝" : "󰲝"
             color: root.tailnetOnly ? Color.accent : Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.5)
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -362,6 +369,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             text: root.transportText
             color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.5)
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -399,6 +407,7 @@ Panel {
       implicitHeight: Math.max(rowGlyph.implicitHeight, info.implicitHeight)
 
       Text {
+        textFormat: Text.PlainText
         id: rowGlyph
         anchors.left: parent.left
         anchors.verticalCenter: parent.verticalCenter
@@ -417,6 +426,7 @@ Panel {
         anchors.verticalCenter: parent.verticalCenter
 
         Text {
+          textFormat: Text.PlainText
           text: row.callSign + (row.self ? " (you)" : "")
           color: row.onAir ? Color.accent : row.foreground
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -427,6 +437,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           text: row.onAir ? "ON AIR" : (row.self ? "This machine" : "Listening")
           color: Qt.darker(row.foreground, 1.4)
           font.family: root.bar ? root.bar.fontFamily : Style.font.family

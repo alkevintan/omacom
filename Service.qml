@@ -63,7 +63,7 @@ Item {
   // a name can neither forge a packet field nor smuggle shell syntax.
   function sanitizeCallSign(name) {
     var out = String(name === undefined || name === null ? "" : name)
-      .replace(/[|\r\n\x00-\x1f]/g, "")
+      .replace(/[|<>\r\n\x00-\x1f\x7f]/g, "")
       .replace(/['"\\`$]/g, "")
       .trim()
     return out.length > 32 ? out.slice(0, 32) : out
@@ -299,7 +299,10 @@ Item {
     if (!root.daemonUp) return
     if (socketProc.running) return // an op is in flight — poll after it lands
     root._pollStarted = Date.now()
-    pollProc.command = ["sh", "-c", "printf '{\"op\":\"getPeers\"}\\n' | socat -t1 - UNIX-CONNECT:" + root.socketPath + " 2>/dev/null | head -c 4096"]
+    pollProc.command = ["sh", "-c",
+      "printf '%s\\n' " + root.shQuote(JSON.stringify({ op: "getPeers" }))
+      + " | socat -t1 - UNIX-CONNECT:" + root.shQuote(root.socketPath)
+      + " 2>/dev/null | head -c 4096"]
     pollProc.running = true
   }
 
@@ -349,7 +352,7 @@ Item {
 
   Process {
     id: probeProc
-    command: ["sh", "-c", "test -x " + root.engineBin + " && echo ok || echo missing"]
+    command: ["sh", "-c", "test -x " + root.shQuote(root.engineBin) + " && echo ok || echo missing"]
     stdout: StdioCollector { id: probeOut; waitForEnd: true }
     onExited: function(exitCode) {
       var out = String(probeOut.text || "").trim()

@@ -48,6 +48,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -88,16 +90,30 @@ type daemon struct {
 
 // sanitizeCallSign strips separators/control chars so a call-sign can never
 // forge packet framing (fields are "|" delimited) and stays one short line.
+const maxCallSignRunes = 32
+
 func sanitizeCallSign(s string) string {
 	s = strings.Map(func(r rune) rune {
-		if r == '|' || r == '\n' || r == '\r' || r < 0x20 {
+		switch {
+		case r == '|': // packet field separator
+			return -1
+		case r == '<' || r == '>': // QML Text auto-detects rich text
+			return -1
+		case r == utf8.RuneError: // invalid UTF-8 from the wire
+			return -1
+		case unicode.IsControl(r): // covers NUL, CR, LF, DEL, C1
 			return -1
 		}
 		return r
 	}, s)
 	s = strings.TrimSpace(s)
-	if len(s) > 32 {
-		s = string([]rune(s)[:32])
+	// Truncate by runes, not bytes. `len(s)` counts bytes, so a name of 12
+	// emoji measured 48 and was then sliced to []rune(s)[:32] -- past the
+	// end of a 12-element slice. Go permits that whenever the conversion
+	// over-allocated, so instead of panicking it silently appended NUL
+	// runes, which then went out in hello packets and into the roster.
+	if r := []rune(s); len(r) > maxCallSignRunes {
+		s = string(r[:maxCallSignRunes])
 	}
 	return s
 }
